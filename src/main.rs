@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Server, Response};
 
 const MINER_REWARD: u64 = 100;
-const STARTING_DIFFICULTY: u8 = 12;
+const STARTING_DIFFICULTY: u8 = 20;
+
+type Hash = [u8;32];
 
 #[derive(Debug)]
 struct Blockchain {
@@ -60,7 +62,7 @@ impl Blockchain {
     fn current_block_ref(&mut self) -> &Block {
         self.stack.last().ok_or("fatal: no block on stack").unwrap()
     }
-    fn current_hash(&self) -> [u8; 32] {
+    fn current_hash(&self) -> Hash {
         *self
             .hashes
             .last()
@@ -71,7 +73,7 @@ impl Blockchain {
         self.stack.push(block);
         self.current_block_updated_flag = false;
     }
-    fn add_hash_to_new_block(&mut self, hash: [u8; 32]) {
+    fn add_hash_to_new_block(&mut self, hash: Hash) {
         self.hashes.push(hash);
     }
     fn update_current_mining_block(&mut self, block: Block) {
@@ -224,7 +226,7 @@ struct Block {
     version: u8,
     index: u64,
 
-    previous_hash: [u8; 32],
+    previous_hash: Hash,
     timestamp: i64,
 
     difficulty: u8,
@@ -252,7 +254,7 @@ impl Block {
         .to_vec()
         .concat()
     }
-    fn hash(&self) -> [u8; 32] {
+    fn hash(&self) -> Hash {
         let mut hasher = Blake2s256::new();
         // write input message
         hasher.update(self.serialize_to_byte_vec());
@@ -279,7 +281,7 @@ impl Block {
     fn new_from_current_time(
         version: u8,
         index: u64,
-        previous_hash: [u8; 32],
+        previous_hash: Hash,
         difficulty: u8,
     ) -> Block {
         Block {
@@ -493,7 +495,8 @@ fn ask_for_user_action(
     }
     Ok(())
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+fn main() -> Result<(), Box<dyn std::error::Error>>{
     println!("sl-coin version: 0.0.1");
 
     sodiumoxide::init().unwrap();
@@ -509,19 +512,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let blockchain_for_user_func = arced_mutexed_blockchain.clone();
     let blockchain_controller_for_user_func = arced_mutexed_blockchain_controller.clone();
-    ask_for_user_action(blockchain_for_user_func,blockchain_controller_for_user_func)?;
-    
+    let user_action_thread = thread::spawn(move ||{
+        ask_for_user_action(blockchain_for_user_func,blockchain_controller_for_user_func).unwrap();
+    });
+
+    let mut peers: Vec<&str> = vec![];
+
     let server = Server::http("0.0.0.0:8421").unwrap();
 
-    for request in server.incoming_requests() {
-        println!("received request! method: {:?}, url: {:?}, headers: {:?}",
+    for mut request in server.incoming_requests() {
+        println!("received request! method: {:?}, url: {:?}, body_length: {:?}",
             request.method(),
             request.url(),
-            request.headers()
+            request.body_length()
         );
-    
+        match request.url(){
+            "/get_blockchain" => {
+
+            },
+            "/post_block" => {
+                
+            }
+            _ => {
+
+            }
+        }
+
+        let mut content = String::new();
+        request.as_reader().read_to_string(&mut content).unwrap();
+
         let response = Response::from_string("hello world");
-        request.respond(response);
+        request.respond(response)?;
     }
     Ok(())
 }
