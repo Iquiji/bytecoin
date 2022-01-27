@@ -112,7 +112,7 @@ impl Blockchain {
         total
     }
 }
-fn mine_new_block(blockchain: Arc<Mutex<Blockchain>>, identity: Identity) -> bool {
+fn mine_new_block(blockchain: Arc<Mutex<Blockchain>>,blockchain_controller: Arc<Mutex<BlockchainController>>,identity: Identity) -> bool {
     // Get MutexGuard
     let mut current_blockchain_handle = blockchain.lock();
 
@@ -135,7 +135,7 @@ fn mine_new_block(blockchain: Arc<Mutex<Blockchain>>, identity: Identity) -> boo
     println!(
         "struct: {:?},as_bytes: {:?}",
         block,
-        block.serialize_to_byte_vec()
+        block.serialize_to_bytes()
     );
 
     const BATCH_SIZE: usize = 1028;
@@ -220,8 +220,9 @@ impl Identity {
     }
 }
 
-// 8 + 64 + 256 + 64 + 8 + 32 + 16 + ? = 448 + ? bytes
-#[derive(Debug, Clone)]
+// 1 + 8 + 32 + 8 + 1 + 4 + 2 + ? = 56 bytes + ? bytes
+// 137 bytes per Transaction: ? x 137 bytes
+#[derive(Debug, Clone,PartialEq, Eq)]
 struct Block {
     version: u8,
     index: u64,
@@ -236,7 +237,21 @@ struct Block {
     transactions: Vec<Transaction>,
 }
 impl Block {
-    fn serialize_to_byte_vec(&self) -> Vec<u8> {
+    fn deserialize_from_bytes(data: &[u8]) -> Result<Block,Box<dyn Error>>{
+        Ok(Block { 
+            version: data[0],  // 1
+            index: u64::from_be_bytes(data[1..9].try_into()?), // 8
+            previous_hash: data[9..41].try_into()?, // 32
+            timestamp: i64::from_be_bytes(data[41..49].try_into()?), // 8
+            difficulty: data[49], // 1
+            nonce: u32::from_be_bytes(data[50..54].try_into()?), // 4
+            num_transactions: u16::from_be_bytes(data[54..56].try_into()?), // 2
+            transactions: data[56..].chunks(137).filter(|x|!x.is_empty()).map(|chunk| {
+                Transaction::deserialize_from_bytes(chunk)
+            }).map(|transaction| transaction.ok()).filter(|x| x.is_some()).map(|f| f.ok_or("fatal: error while deserializing Block").unwrap()).collect()
+        })
+    }   
+    fn serialize_to_bytes(&self) -> Vec<u8> {
         [
             [self.version].to_vec(),
             self.index.to_be_bytes().to_vec(),
@@ -247,7 +262,7 @@ impl Block {
             self.num_transactions.to_be_bytes().to_vec(),
             self.transactions
                 .iter()
-                .map(|transaction| transaction.serialize_to_byte_vec())
+                .map(|transaction| transaction.serialize_to_bytes())
                 .collect::<Vec<Vec<u8>>>()
                 .concat(),
         ]
@@ -257,7 +272,7 @@ impl Block {
     fn hash(&self) -> Hash {
         let mut hasher = Blake2s256::new();
         // write input message
-        hasher.update(self.serialize_to_byte_vec());
+        hasher.update(self.serialize_to_bytes());
 
         // read hash digest
         let result = hasher.finalize();
@@ -297,7 +312,8 @@ impl Block {
     }
 }
 
-#[derive(Debug, Clone)]
+// 32 + 32 + 8 + 64 + 1 = 137 bytes
+#[derive(Debug, Clone,std::cmp::PartialEq, Eq)]
 struct Transaction {
     sender: PublicKey,
     reciever: PublicKey,
@@ -306,7 +322,18 @@ struct Transaction {
     miner_reward_flag: u8,
 }
 impl Transaction {
-    fn serialize_to_byte_vec(&self) -> Vec<u8> {
+    fn deserialize_from_bytes(data: &[u8]) -> Result<Transaction,Box<dyn Error>>{
+        Ok(Transaction {
+            sender: PublicKey::from_slice(&data[0..32]).ok_or("Failed to deserialize Transaction bytes")?,
+            reciever: PublicKey::from_slice(&data[32..64]).ok_or("Failed to deserialize Transaction bytes")?,
+            amount: u64::from_be_bytes(data[64..72].try_into()?),
+            signature_of_sender: Signature::from_bytes(&data[72..136]).unwrap(),
+            miner_reward_flag: data[136],
+                
+        })
+    }
+
+    fn serialize_to_bytes(&self) -> Vec<u8> {
         [
             self.sender.as_ref(),
             self.reciever.as_ref(),
@@ -376,7 +403,14 @@ impl Transaction {
 }
 
 struct BlockchainController{
-    blockchain: Arc<Mutex<Blockchain>>
+    blockchain: Arc<Mutex<Blockchain>>,
+    peers: Vec<String>,
+    mined_flag: bool,
+}
+impl BlockchainController{
+    fn publish_new_mined_block(block_to_be_published: Block){
+
+    }
 }
 
 fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
@@ -401,9 +435,10 @@ fn ask_for_user_action(
         let command: String = prompt("Enter a command")?;
         if command == "mine" {
             let thread_blockchain_mutex = blockchain.clone();
+            let thread_blockchain_controller_mutex = blockchain_controller.clone();
             let thread_current_identity = current_identity.clone();
             thread::spawn(move || {
-                mine_new_block(thread_blockchain_mutex, thread_current_identity);
+                mine_new_block(thread_blockchain_mutex,thread_blockchain_controller_mutex,thread_current_identity);
             });
         } else if command == "balance" {
             let account_to_balance_check: Option<String> = prompt_opt("What account do you want to balance check? (leave empty for current identity)")?;
@@ -477,16 +512,19 @@ fn ask_for_user_action(
             }
         } else if command == "exit" {
             break;
+        } else if command == "transfer" {
+            unimplemented!();
         } else {
             println!(
                 "
             Commands:
+                connect - connects to a given node in the network and gets their peers
                 mine - tries to mine next block
                 cancel - cancels the mining of this block
                 transfer - transfers fund to account
                 generate - generates a wallet keypait
                 balance - check balance of account (defaulting to your own)
-                exit - stops the programm
+                exit - stops the programm # Not Working use Ctrl+C
                 load - loads saved identity
                 save - saves current identity 
             "
@@ -505,7 +543,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
     let arced_mutexed_blockchain = Arc::new(Mutex::new(blockchain));
 
     let blockchain_controller = BlockchainController{
-        blockchain: arced_mutexed_blockchain.clone()
+        blockchain: arced_mutexed_blockchain.clone(),
+        peers: vec![],
+        mined_flag: false,
     };
     let arced_mutexed_blockchain_controller = Arc::new(Mutex::new(blockchain_controller));
 
@@ -516,33 +556,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
         ask_for_user_action(blockchain_for_user_func,blockchain_controller_for_user_func).unwrap();
     });
 
-    let mut peers: Vec<&str> = vec![];
-
     let server = Server::http("0.0.0.0:8421").unwrap();
 
     for mut request in server.incoming_requests() {
-        println!("received request! method: {:?}, url: {:?}, body_length: {:?}",
-            request.method(),
-            request.url(),
-            request.body_length()
-        );
-        match request.url(){
-            "/get_blockchain" => {
-
-            },
-            "/post_block" => {
-                
-            }
-            _ => {
-
-            }
-        }
-
+        
         let mut content = String::new();
         request.as_reader().read_to_string(&mut content).unwrap();
 
-        let response = Response::from_string("hello world");
-        request.respond(response)?;
+        match request.url(){
+            "/get_blockchain" => {
+                println!("{} wants the entire Blockchain",request.remote_addr());
+
+                let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+
+                let response = Response::from_string("hello world");
+                request.respond(response)?;
+
+                std::mem::drop(blockchain_controller_handle);
+            },
+            "/post_block" => {
+                println!("got Block: {}",content);
+            },
+            "/post_add_peers" => {
+                println!("{} wants to add peers: {}",request.remote_addr(),content);
+            },
+            "/get_blockchain_hashed_and_length" => {
+                println!("{} wants our blockchain length and hashed",request.remote_addr());
+            },
+            "/connect" =>{
+                let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+
+                blockchain_controller_handle.peers.push(request.remote_addr().to_string());
+
+                std::mem::drop(blockchain_controller_handle);
+            },
+            _ => {
+                println!("received request! method: {:?}, url: {:?}, body_length: {:?}",
+                    request.method(),
+                    request.url(),
+                    request.body_length()
+                );
+            }
+        }
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::{Transaction, Identity,Block};
+
+    #[test]
+    fn transaction_serialize_deserialize_eq() {
+        sodiumoxide::init().unwrap();
+        let current_identity = Identity::generate_new();
+        let transaction: Transaction = Transaction::generate_miner_transaction(current_identity.public_key);
+        let serialized = transaction.serialize_to_bytes();
+        let deserialized = Transaction::deserialize_from_bytes(&serialized);
+
+        assert_eq!(transaction,deserialized.unwrap());
+    }
+    #[test]
+    fn block_serialize_deserialize_eq(){
+        sodiumoxide::init().unwrap();
+        let current_identity = Identity::generate_new();
+        let transaction: Transaction = Transaction::generate_miner_transaction(current_identity.public_key);
+        let mut block = Block::new_from_current_time(0u8, 0, [7u8; 32], 20);
+        block.add_transaction(transaction);
+        let serialized = block.serialize_to_bytes();
+        let deserialized = Block::deserialize_from_bytes(&serialized);
+
+        assert_eq!(block,deserialized.unwrap());
+    }
 }
