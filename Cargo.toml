@@ -1,7 +1,16 @@
 [package]
-name = "sl-coin"
-version = "0.1.0"
+name = "bytecoin"
+version = "0.0.1"
 edition = "2021"
+authors = ["Iquiji <me@example.com>"]
+
+[lib]
+name = "bytecoin_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bytecoin_bin"
+path = "src/bin/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,3 +32,10 @@ parking_lot = "0.11"
 
 tiny_http = "0.10.0"
 ureq = "2.4"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "benchmarks"
+harness = false
