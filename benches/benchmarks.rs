@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, AxisScale, PlotConfiguration};
 use criterion::BenchmarkId;
 use criterion::Throughput;
 
@@ -11,7 +11,11 @@ pub fn blockchain_stack_serialize_100_blocks_variable_transaction_count(c: &mut 
 
     let mut blockchain = Blockchain::genesis();
         
+    let plot_config = PlotConfiguration::default()
+        .summary_scale(AxisScale::Logarithmic);
+
     let mut group = c.benchmark_group("blockchain_stack_serialize_100_blocks_variable_transaction_count");
+    group.plot_config(plot_config);
 
     let mut blockchain = Blockchain::genesis();
 
@@ -44,11 +48,15 @@ pub fn blockchain_stack_deserialize_100_blocks_variable_transaction_count(c: &mu
 
     let mut blockchain = Blockchain::genesis();
         
-    let mut group = c.benchmark_group("blockchain_stack_serialize_100_blocks_variable_transaction_count");
+    let plot_config = PlotConfiguration::default()
+        .summary_scale(AxisScale::Logarithmic);
+
+    let mut group = c.benchmark_group("blockchain_stack_deserialize_100_blocks_variable_transaction_count");
+    group.plot_config(plot_config);
 
     let mut blockchain = Blockchain::genesis();
 
-    for num_transactions_per_block in [1,5,10,25,50,100,200,500,1000,2500].iter() {
+    for num_transactions_per_block in [1,5,10,25,50,100,200,500,1000,2500,5000,10000,25000].iter() {
 
         // add 100 Blocks with num_transactions_per_block Transactions each to the blockchain
         for _ in 0..100{

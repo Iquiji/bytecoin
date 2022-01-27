@@ -12,7 +12,7 @@ use sodiumoxide::crypto::sign::{self, sign_detached};
 use serde::{Deserialize, Serialize};
 
 const MINER_REWARD: u64 = 100;
-const STARTING_DIFFICULTY: u8 = 20;
+const STARTING_DIFFICULTY: u8 = 10;
 
 type Hash = [u8;32];
 

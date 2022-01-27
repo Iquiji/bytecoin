@@ -158,8 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>>{
                 println!("{} wants the entire Blockchain",request.remote_addr());
 
                 let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+                let blockchain_handle = arced_mutexed_blockchain.lock();
 
-                let response = Response::from_string("hello world");
+                let response = Response::from_data(blockchain_handle.serialize_stack_to_bytes());
                 request.respond(response)?;
 
                 std::mem::drop(blockchain_controller_handle);
