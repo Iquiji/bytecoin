@@ -1,4 +1,6 @@
 use parking_lot::Mutex;
+use std::collections::HashSet;
+use std::io::Read;
 use std::sync::Arc;
 
 use std::error::Error;
@@ -14,16 +16,50 @@ use serde::{Deserialize, Serialize};
 const MINER_REWARD: u64 = 100;
 const STARTING_DIFFICULTY: u8 = 10;
 
-type Hash = [u8;32];
+type Hash = [u8; 32];
 
-pub struct BlockchainController{
+pub struct BlockchainController {
     pub blockchain: Arc<Mutex<Blockchain>>,
-    pub peers: Vec<String>,
+    pub peers: HashSet<String>,
     pub mined_flag: bool,
 }
-impl BlockchainController{
-    pub fn publish_new_mined_block(block_to_be_published: Block){
+impl BlockchainController {
+    pub fn publish_new_mined_block(
+        &self,
+        block_to_be_published: &Block,
+    ) -> Result<(), Box<dyn Error>> {
+        let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
 
+        for peer in all_peers {
+            let peer_http_patted = "http://".to_owned() + &peer + "/post_block";
+
+            println!("sending block to {:?}", peer_http_patted);
+
+            let response = ureq::post(&peer_http_patted)
+                .send_string(&hex::encode(block_to_be_published.serialize_to_bytes()))?;
+            println!("response: {:?}", response);
+        }
+
+        Ok(())
+    }
+    pub fn connect_to_peer_and_get_peers(
+        &mut self,
+        peer_to_connect_to: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let response = ureq::post(peer_to_connect_to).call()?;
+        println!("response: {:?}", response);
+
+        let mut content: String = String::new();
+        response.into_reader().read_to_string(&mut content)?;
+
+        let new_peers: Vec<&str> = content.split_whitespace().collect();
+
+        for peer in new_peers {
+            self.peers.insert(peer.to_string());
+            println!("Added Peer: '{}' to Peerlist", peer);
+        }
+
+        Ok(())
     }
 }
 
@@ -36,7 +72,7 @@ pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
     v.get(n_zeroes).map_or(0, |x| x.leading_zeros()) + 8 * n_zeroes as u32
 }
 
-#[derive(Debug,PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Blockchain {
     pub stack: Vec<Block>,
     pub hashes: Vec<[u8; 32]>,
@@ -64,24 +100,67 @@ impl Blockchain {
         }
     }
 
-    pub fn serialize_stack_to_bytes(&self) -> Vec<u8>{
-        self.stack.iter().map(|block| block.serialize_to_bytes()).collect::<Vec<Vec<u8>>>().concat()
+    pub fn verify(&self) -> bool{
+        // Verifiy integrity of hashes for each block:
+        for (block,hash) in self.stack.iter().cloned().zip(&self.hashes){
+            if &block.hash() != hash{
+                return false;
+            }
+        }
+
+        // Verify integrity of hashes in blocks in each other:
+        for blocks in self.stack.windows(2){
+            let prev = &blocks[0];
+            let current = &blocks[1];
+
+            if prev.hash() != current.previous_hash{
+                return false;
+            }
+        }
+
+        // Verify timestamp correspondence in all blocks:
+        for blocks in self.stack.windows(2){
+            let prev = &blocks[0];
+            let current = &blocks[1];
+
+            if prev.timestamp > current.timestamp{
+                return false;
+            }
+        }
+
+        // Verify inner block integrity
+        for block in &self.stack{
+            if !block.verify(){
+                return false;
+            }
+        }
+
+        true
     }
-    pub fn deserialize_stack_from_bytes(data: &[u8]) -> Result<Vec<Block>,Box<dyn Error>>{
+
+    pub fn serialize_stack_to_bytes(&self) -> Vec<u8> {
+        self.stack
+            .iter()
+            .map(|block| block.serialize_to_bytes())
+            .collect::<Vec<Vec<u8>>>()
+            .concat()
+    }
+    pub fn deserialize_stack_from_bytes(data: &[u8]) -> Result<Vec<Block>, Box<dyn Error>> {
         // Remaining Data to be split into Blocks
         let mut remaining_data = data;
 
         let mut stack: Vec<Block> = vec![];
-        
+
         // Basic block is 56 bytes long
         // 1 Transaction is 137 bytes long
-        while remaining_data.len() > 55{
+        while remaining_data.len() > 55 {
             // Transaction amount in bytes 54 & 55 (started from 0)
             // get number of transactions in this Block-bytespace
-            let mut num_transactions = u16::from_be_bytes([remaining_data[54],remaining_data[55]]);
+            let num_transactions = u16::from_be_bytes([remaining_data[54], remaining_data[55]]);
 
             // Get all bytes in this Block-bytespace
-            let this_block_data_temp = remaining_data.split_at(56 + num_transactions as usize * 137);
+            let this_block_data_temp =
+                remaining_data.split_at(56 + num_transactions as usize * 137);
             // and push the rest for to be used in next loop
             remaining_data = this_block_data_temp.1;
             // our now data
@@ -145,15 +224,15 @@ impl Blockchain {
     pub fn destroy_current_block(&mut self) {
         self.stack.pop();
     }
-    pub fn check_balance_of_account(&self,account_pk: PublicKey) -> u64{
+    pub fn check_balance_of_account(&self, account_pk: PublicKey) -> u64 {
         let mut total: u64 = 0;
 
-        for block in &self.stack{
-            for transaction in &block.transactions{
-                if transaction.reciever == account_pk{
+        for block in &self.stack {
+            for transaction in &block.transactions {
+                if transaction.reciever == account_pk {
                     total += transaction.amount;
                 }
-                if transaction.sender == account_pk{
+                if transaction.sender == account_pk {
                     total -= transaction.amount;
                 }
             }
@@ -162,7 +241,11 @@ impl Blockchain {
         total
     }
 }
-pub fn mine_new_block(blockchain: Arc<Mutex<Blockchain>>,blockchain_controller: Arc<Mutex<BlockchainController>>,identity: Identity) -> bool {
+pub fn mine_new_block(
+    blockchain: Arc<Mutex<Blockchain>>,
+    blockchain_controller: Arc<Mutex<BlockchainController>>,
+    identity: Identity,
+) -> bool {
     // Get MutexGuard
     let mut current_blockchain_handle = blockchain.lock();
 
@@ -217,8 +300,14 @@ pub fn mine_new_block(blockchain: Arc<Mutex<Blockchain>>,blockchain_controller: 
                 );
 
                 let mut current_blockchain_handle = blockchain.lock();
-                current_blockchain_handle.add_block(block);
+                current_blockchain_handle.add_block(block.clone());
                 current_blockchain_handle.add_hash_to_new_block(hash_result);
+
+                // Publish new block to all peers
+                let blockchain_controller_handle = blockchain_controller.lock();
+
+                let _res =blockchain_controller_handle.publish_new_mined_block(&block);
+
                 return true;
             }
         }
@@ -272,7 +361,7 @@ impl Identity {
 
 // 1 + 8 + 32 + 8 + 1 + 4 + 2 + ? = 56 bytes + ? bytes
 // 137 bytes per Transaction: ? x 137 bytes
-#[derive(Debug, Clone,PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     version: u8,
     index: u64,
@@ -287,20 +376,36 @@ pub struct Block {
     transactions: Vec<Transaction>,
 }
 impl Block {
-    pub fn deserialize_from_bytes(data: &[u8]) -> Result<Block,Box<dyn Error>>{
-        Ok(Block { 
-            version: data[0],  // 1
-            index: u64::from_be_bytes(data[1..9].try_into()?), // 8
-            previous_hash: data[9..41].try_into()?, // 32
-            timestamp: i64::from_be_bytes(data[41..49].try_into()?), // 8
-            difficulty: data[49], // 1
-            nonce: u32::from_be_bytes(data[50..54].try_into()?), // 4
+
+    pub fn verify(&self) -> bool{
+        for transaction in &self.transactions{
+            if !transaction.verify(){
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn deserialize_from_bytes(data: &[u8]) -> Result<Block, Box<dyn Error>> {
+        Ok(Block {
+            version: data[0],                                               // 1
+            index: u64::from_be_bytes(data[1..9].try_into()?),              // 8
+            previous_hash: data[9..41].try_into()?,                         // 32
+            timestamp: i64::from_be_bytes(data[41..49].try_into()?),        // 8
+            difficulty: data[49],                                           // 1
+            nonce: u32::from_be_bytes(data[50..54].try_into()?),            // 4
             num_transactions: u16::from_be_bytes(data[54..56].try_into()?), // 2
-            transactions: data[56..].chunks(137).filter(|x|!x.is_empty()).map(|chunk| {
-                Transaction::deserialize_from_bytes(chunk)
-            }).map(|transaction| transaction.ok()).filter(|x| x.is_some()).map(|f| f.ok_or("fatal: error while deserializing Block").unwrap()).collect()
+            transactions: data[56..]
+                .chunks(137)
+                .filter(|x| !x.is_empty())
+                .map(|chunk| Transaction::deserialize_from_bytes(chunk))
+                .map(|transaction| transaction.ok())
+                .filter(|x| x.is_some())
+                .map(|f| f.ok_or("fatal: error while deserializing Block").unwrap())
+                .collect(),
         })
-    }   
+    }
     pub fn serialize_to_bytes(&self) -> Vec<u8> {
         [
             [self.version].to_vec(),
@@ -363,7 +468,7 @@ impl Block {
 }
 
 // 32 + 32 + 8 + 64 + 1 = 137 bytes
-#[derive(Debug, Clone,std::cmp::PartialEq, Eq)]
+#[derive(Debug, Clone, std::cmp::PartialEq, Eq)]
 pub struct Transaction {
     sender: PublicKey,
     reciever: PublicKey,
@@ -372,14 +477,35 @@ pub struct Transaction {
     miner_reward_flag: u8,
 }
 impl Transaction {
-    pub fn deserialize_from_bytes(data: &[u8]) -> Result<Transaction,Box<dyn Error>>{
+    pub fn verify(&self) -> bool {
+        let mut is_valid = true;
+
+        if (self.miner_reward_flag == 1 && self.sender.as_ref() != [0u8; 32])
+            || (sign::verify_detached(
+                &self.signature_of_sender,
+                &Transaction::in_flight_transaction_to_be_signed(
+                    self.sender,
+                    self.reciever,
+                    self.amount,
+                ),
+                &self.sender,
+            ))
+        {
+            is_valid = false;
+        }
+
+        is_valid
+    }
+
+    pub fn deserialize_from_bytes(data: &[u8]) -> Result<Transaction, Box<dyn Error>> {
         Ok(Transaction {
-            sender: PublicKey::from_slice(&data[0..32]).ok_or("Failed to deserialize Transaction bytes")?,
-            reciever: PublicKey::from_slice(&data[32..64]).ok_or("Failed to deserialize Transaction bytes")?,
+            sender: PublicKey::from_slice(&data[0..32])
+                .ok_or("Failed to deserialize Transaction bytes")?,
+            reciever: PublicKey::from_slice(&data[32..64])
+                .ok_or("Failed to deserialize Transaction bytes")?,
             amount: u64::from_be_bytes(data[64..72].try_into()?),
             signature_of_sender: Signature::from_bytes(&data[72..136]).unwrap(),
             miner_reward_flag: data[136],
-                
         })
     }
 
@@ -401,7 +527,7 @@ impl Transaction {
         amount: u64,
     ) -> Self {
         let to_be_signed = Self::in_flight_transaction_to_be_signed(
-            secret_key.clone(),
+            secret_key.public_key(),
             reciever_public_key,
             amount,
         );
@@ -415,15 +541,15 @@ impl Transaction {
     }
     pub fn generate_miner_transaction(miner_public_key: PublicKey) -> Self {
         let to_be_signed = Self::in_flight_transaction_to_be_signed(
-            SecretKey::from_slice(&[0u8; 64])
-                .ok_or("failed to generate 0ed Secretkey for miner reward")
+            PublicKey::from_slice(&[0u8; 32])
+                .ok_or("failed to generate 0ed PublicKey for miner reward")
                 .unwrap(),
             miner_public_key,
             MINER_REWARD,
         );
         Transaction {
             sender: PublicKey::from_slice(&[0u8; 32])
-                .ok_or("failed to generate 0ed Secretkey for miner reward")
+                .ok_or("failed to generate 0ed PublicKey for miner reward")
                 .unwrap(),
             reciever: miner_public_key,
             signature_of_sender: sign_detached(
@@ -438,12 +564,12 @@ impl Transaction {
     }
 
     pub fn in_flight_transaction_to_be_signed(
-        secret_key: SecretKey,
+        public_key: PublicKey,
         reciever_public_key: PublicKey,
         amount: u64,
     ) -> Vec<u8> {
         [
-            secret_key.as_ref(),
+            public_key.as_ref(),
             reciever_public_key.as_ref(),
             &amount.to_be_bytes().to_vec(),
         ]
