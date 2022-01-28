@@ -18,6 +18,12 @@ const STARTING_DIFFICULTY: u8 = 10;
 
 type Hash = [u8; 32];
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerPlague {
+    pub initiatior: String,            // Peer that started the Plague
+    pub already_infected: Vec<String>, // Peers already infected
+}
+
 pub struct BlockchainController {
     pub blockchain: Arc<Mutex<Blockchain>>,
     pub peers: HashSet<String>,
@@ -61,6 +67,37 @@ impl BlockchainController {
 
         Ok(())
     }
+    pub fn spread_peer_plague(&self, plague: PeerPlague) {
+        let mut evolved_plague = plague.clone();
+
+        let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
+
+        // Compute new plague with new peers if existing
+        for peer in &all_peers {
+            if evolved_plague.already_infected.contains(peer) || peer == &evolved_plague.initiatior {
+                continue;
+            } else {
+                evolved_plague.already_infected.push(peer.to_string());
+            }
+        }
+
+        // Spread to all uninfected peers
+        for peer in all_peers {
+            if plague.already_infected.contains(&peer) || peer == evolved_plague.initiatior {
+                continue;
+            }
+
+            let peer_http_patted = "http://".to_owned() + &peer + "/add_and_spread_peer";
+
+            println!("sending Plague to {:?}", peer_http_patted);
+
+            if let Ok(response) = ureq::post(&peer_http_patted)
+                .send_string(&serde_json::to_string(&evolved_plague).unwrap())
+            {
+                println!("response: {:?}", response);
+            }
+        }
+    }
 }
 
 pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
@@ -75,7 +112,7 @@ pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Blockchain {
     pub stack: Vec<Block>,
-    pub hashes: Vec<[u8; 32]>,
+    pub hashes: Vec<Hash>,
     pub difficulty: u8,
     current_mining_block: Block,
     current_block_updated_flag: bool,
@@ -100,37 +137,37 @@ impl Blockchain {
         }
     }
 
-    pub fn verify(&self) -> bool{
+    pub fn verify(&self) -> bool {
         // Verifiy integrity of hashes for each block:
-        for (block,hash) in self.stack.iter().cloned().zip(&self.hashes){
-            if &block.hash() != hash{
+        for (block, hash) in self.stack.iter().cloned().zip(&self.hashes) {
+            if &block.hash() != hash {
                 return false;
             }
         }
 
         // Verify integrity of hashes in blocks in each other:
-        for blocks in self.stack.windows(2){
+        for blocks in self.stack.windows(2) {
             let prev = &blocks[0];
             let current = &blocks[1];
 
-            if prev.hash() != current.previous_hash{
+            if prev.hash() != current.previous_hash {
                 return false;
             }
         }
 
         // Verify timestamp correspondence in all blocks:
-        for blocks in self.stack.windows(2){
+        for blocks in self.stack.windows(2) {
             let prev = &blocks[0];
             let current = &blocks[1];
 
-            if prev.timestamp > current.timestamp{
+            if prev.timestamp > current.timestamp {
                 return false;
             }
         }
 
         // Verify inner block integrity
-        for block in &self.stack{
-            if !block.verify(){
+        for block in &self.stack {
+            if !block.verify() {
                 return false;
             }
         }
@@ -306,7 +343,7 @@ pub fn mine_new_block(
                 // Publish new block to all peers
                 let blockchain_controller_handle = blockchain_controller.lock();
 
-                let _res =blockchain_controller_handle.publish_new_mined_block(&block);
+                let _res = blockchain_controller_handle.publish_new_mined_block(&block);
 
                 return true;
             }
@@ -376,10 +413,9 @@ pub struct Block {
     transactions: Vec<Transaction>,
 }
 impl Block {
-
-    pub fn verify(&self) -> bool{
-        for transaction in &self.transactions{
-            if !transaction.verify(){
+    pub fn verify(&self) -> bool {
+        for transaction in &self.transactions {
+            if !transaction.verify() {
                 return false;
             }
         }

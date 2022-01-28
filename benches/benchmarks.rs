@@ -1,12 +1,8 @@
 use criterion::BenchmarkId;
 use criterion::Throughput;
-use criterion::{
-    criterion_group, criterion_main, AxisScale, Criterion, PlotConfiguration,
-};
+use criterion::{criterion_group, criterion_main, AxisScale, Criterion, PlotConfiguration};
 
-use bytecoin_lib::{
-    Block, Blockchain, Identity, Transaction,
-};
+use bytecoin_lib::{Block, Blockchain, Identity, Transaction};
 
 pub fn blockchain_stack_serialize_100_blocks_variable_transaction_count(c: &mut Criterion) {
     let id = Identity::generate_new();

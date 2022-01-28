@@ -10,9 +10,7 @@ use sodiumoxide::crypto::sign::ed25519::PublicKey;
 
 use tiny_http::{Response, Server};
 
-use bytecoin_lib::{
-    mine_new_block, Block, Blockchain, BlockchainController, Identity,
-};
+use bytecoin_lib::{mine_new_block, Block, Blockchain, BlockchainController, Identity, PeerPlague};
 
 fn ask_for_user_action(
     blockchain: Arc<Mutex<Blockchain>>,
@@ -248,11 +246,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 request.respond(response)?;
 
+                blockchain_controller_handle.spread_peer_plague(PeerPlague {
+                    initiatior: remote_addr.clone(),
+                    already_infected: vec![],
+                });
+
                 std::mem::drop(blockchain_controller_handle);
 
                 println!(
                     "Added '{}' to peers and gave them our peer list",
                     remote_addr
+                );
+            }
+            "/add_and_spread_peer" => {
+                println!("{} wants us to spread a plague",remote_addr);
+
+                let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+
+                let plague: PeerPlague = serde_json::from_str(&String::from_utf8(content)?)?;
+
+                println!("Plague: {:?}",plague);
+
+                blockchain_controller_handle.peers.insert(plague.initiatior.clone());
+
+                blockchain_controller_handle.spread_peer_plague(plague.clone());
+
+                std::mem::drop(blockchain_controller_handle);
+
+                println!(
+                    "Plague initiated by '{}', further infecting all known peers",
+                    plague.initiatior
                 );
             }
             _ => {
