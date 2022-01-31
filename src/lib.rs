@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 const MINER_REWARD: u64 = 100;
 const STARTING_DIFFICULTY: u8 = 15;
+const VERSION: u8 = 0;
 
 type Hash = [u8; 32];
 
@@ -125,18 +126,13 @@ pub struct Blockchain {
 }
 impl Blockchain {
     pub fn genesis() -> Self {
-        let genesis_block = Block::new_from_current_time(0u8, 0, [0u8; 32], STARTING_DIFFICULTY);
+        let genesis_block = Block::generate_genisis_block(VERSION, STARTING_DIFFICULTY);
 
         Blockchain {
             stack: vec![genesis_block.clone()],
             hashes: vec![genesis_block.hash()],
             difficulty: STARTING_DIFFICULTY,
-            current_mining_block: Block::new_from_current_time(
-                0u8,
-                0,
-                [0u8; 32],
-                STARTING_DIFFICULTY,
-            ),
+            current_mining_block: Block::generate_genisis_block(VERSION, STARTING_DIFFICULTY),
             current_block_updated_flag: false,
             cancel_mining_flag: false,
             currently_mining: false,
@@ -147,6 +143,7 @@ impl Blockchain {
         // Verifiy integrity of hashes for each block:
         for (block, hash) in self.stack.iter().cloned().zip(&self.hashes) {
             if &block.hash() != hash {
+                eprintln!("Hash of Block isnt the same as saved Hash.block: {:?},hash of block: {:?},hash: {:?}",block,hex::encode(block.hash()),hex::encode(hash));
                 return false;
             }
         }
@@ -157,6 +154,7 @@ impl Blockchain {
             let current = &blocks[1];
 
             if prev.hash() != current.previous_hash {
+                eprintln!("hash of previous block and saved in this block are different!");
                 return false;
             }
         }
@@ -167,6 +165,7 @@ impl Blockchain {
             let current = &blocks[1];
 
             if prev.timestamp > current.timestamp {
+                eprintln!("timestamp of previous block is bigger than this block!");
                 return false;
             }
         }
@@ -176,6 +175,7 @@ impl Blockchain {
             let current = &blocks[1];
 
             if prev.index > current.index {
+                eprintln!("index of previous block is bigger than this block!");
                 return false;
             }
         }
@@ -183,6 +183,7 @@ impl Blockchain {
         // Verify inner block integrity
         for block in &self.stack {
             if !block.verify() {
+                eprintln!("inner Verification of block failed. block: {:?}",block);
                 return false;
             }
         }
@@ -463,6 +464,21 @@ impl Block {
         }
 
         true
+    }
+    fn generate_genisis_block(
+        version: u8,
+        difficulty: u8,
+    ) -> Block {
+        Block {
+            version,
+            index: 0,
+            previous_hash: [0u8;32],
+            timestamp: 0i64,
+            difficulty,
+            nonce: 0,
+            num_transactions: 0,
+            transactions: vec![],
+        }
     }
 
     pub fn deserialize_from_bytes(data: &[u8]) -> Result<Block, Box<dyn Error>> {
