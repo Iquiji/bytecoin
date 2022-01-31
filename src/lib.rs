@@ -302,10 +302,10 @@ pub fn mine_new_block(
     // Get MutexGuard
     let mut current_blockchain_handle = blockchain.lock();
 
-    if current_blockchain_handle.currently_mining{
+    if current_blockchain_handle.currently_mining {
         println!("already mining! EXITING mining function");
         return false;
-    }else{
+    } else {
         current_blockchain_handle.currently_mining = true;
     }
 
@@ -363,9 +363,9 @@ pub fn mine_new_block(
 
                 if current_blockchain_handle.get_cancel_mining_flag() {
                     eprintln!("canceled mining new block! was at batch: {}", batch_number);
-        
+
                     current_blockchain_handle.currently_mining = false;
-        
+
                     return false;
                 }
 

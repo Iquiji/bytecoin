@@ -227,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         guards.push(guard);
     }
 
-    loop{
+    loop {
         thread::sleep(std::time::Duration::from_secs(5));
     }
     //Ok(())
@@ -264,12 +264,13 @@ fn handle_request(
             request.respond(Response::empty(200u32))?;
 
             // Convert block into Struct
-            let new_block = Block::deserialize_from_bytes(&content_hex_decoded).expect("failed to deserialize Block mined send");
+            let new_block = Block::deserialize_from_bytes(&content_hex_decoded)
+                .expect("failed to deserialize Block mined send");
             println!("got Block: {:?} from {:?}", new_block, remote_addr);
 
             // Verify block
             let verify_res = new_block.verify();
-            if verify_res{
+            if verify_res {
                 println!("block verified by verify function. further verification?...");
 
                 // TODO: further verification code
@@ -280,22 +281,20 @@ fn handle_request(
                 blockchain_handle.add_block(new_block.clone());
                 blockchain_handle.add_hash_to_new_block(new_block.hash());
 
-                if blockchain_handle.verify(){
+                if blockchain_handle.verify() {
                     println!("further verification by blockchain is valid. accepting block...");
 
                     blockchain_handle.set_cancel_mining_flag(true);
-                }else{
+                } else {
                     println!("further verification by blockchain is INVALID. trashing block...");
 
                     // Trash added block and hash
                     blockchain_handle.destroy_current_block_and_hash();
                 }
 
-
                 std::mem::drop(blockchain_controller_handle);
                 std::mem::drop(blockchain_handle);
-
-            }else{
+            } else {
                 println!("block failed to verify by verify function. trashing block!...");
             }
         }
