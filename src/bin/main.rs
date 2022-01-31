@@ -3,12 +3,13 @@ use promptly::{prompt, prompt_default, prompt_opt};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 
+use std::error::Error;
 use std::thread;
 use std::{collections::HashSet, sync::Arc};
 
 use sodiumoxide::crypto::sign::ed25519::PublicKey;
 
-use tiny_http::{Response, Server};
+use tiny_http::{Request, Response, Server};
 
 use bytecoin_lib::{mine_new_block, Block, Blockchain, BlockchainController, Identity, PeerPlague};
 
@@ -145,7 +146,7 @@ fn ask_for_user_action(
             println!(
                 "
             Commands:
-                connect - connects to a given node in the network and gets their peers ❗
+                connect - connects to a given node in the network and gets their peers ✔️
                 mine - tries to mine next block ✔️
                 cancel - cancels the mining of this block ✔️  
                 transfer - transfers fund to account ❗
@@ -173,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         blockchain: arced_mutexed_blockchain.clone(),
         peers: HashSet::new(),
         mined_flag: false,
+        port: thread_rng().gen_range(8000..9000),
     };
     let arced_mutexed_blockchain_controller = Arc::new(Mutex::new(blockchain_controller));
 
@@ -186,106 +188,200 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     });
 
-    let mut rng = thread_rng();
-    let port: usize = rng.gen_range(8000..9000);
+    let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
 
-    let server = Server::http("0.0.0.0:".to_owned() + &port.to_string()).unwrap();
-    println!("listening server on port: {}", port);
+    let server =
+        Server::http("0.0.0.0:".to_owned() + &blockchain_controller_handle.port.to_string())
+            .unwrap();
+    println!(
+        "listening server on port: {}",
+        blockchain_controller_handle.port
+    );
 
-    for mut request in server.incoming_requests() {
-        let mut content = vec![];
-        request.as_reader().read_to_end(&mut content)?;
+    std::mem::drop(blockchain_controller_handle);
 
-        let remote_addr = request.remote_addr().to_string();
+    let server = Arc::new(server);
+    let mut guards = Vec::with_capacity(4);
 
-        match request.url() {
-            "/get_blockchain" => {
-                println!("{} wants the entire Blockchain", remote_addr);
+    for _ in 0..4 {
+        let server = server.clone();
+
+        let arced_mutexed_blockchain_controller = arced_mutexed_blockchain_controller.clone();
+        let arced_mutexed_blockchain = arced_mutexed_blockchain.clone();
+
+        let guard = thread::spawn(move || loop {
+            let rq = server.recv();
+
+            match rq {
+                Ok(request) => {
+                    let _res = handle_request(
+                        request,
+                        arced_mutexed_blockchain_controller.clone(),
+                        arced_mutexed_blockchain.clone(),
+                    );
+                }
+                Err(err) => eprintln!("{}", err),
+            }
+        });
+
+        guards.push(guard);
+    }
+
+    loop{
+        thread::sleep(std::time::Duration::from_secs(5));
+    }
+    //Ok(())
+}
+fn handle_request(
+    mut request: Request,
+    arced_mutexed_blockchain_controller: Arc<Mutex<BlockchainController>>,
+    arced_mutexed_blockchain: Arc<Mutex<Blockchain>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut content = vec![];
+    request.as_reader().read_to_end(&mut content)?;
+
+    let remote_addr = request.remote_addr().to_string();
+
+    match request.url() {
+        "/get_blockchain" => {
+            println!("{} wants the entire Blockchain", remote_addr);
+
+            let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+            let blockchain_handle = arced_mutexed_blockchain.lock();
+
+            let data_as_hex = hex::encode(blockchain_handle.serialize_stack_to_bytes());
+
+            let response = Response::from_string(data_as_hex);
+            request.respond(response)?;
+
+            std::mem::drop(blockchain_controller_handle);
+            std::mem::drop(blockchain_handle);
+        }
+        "/post_mined_block" => {
+            let content_hex_decoded = hex::decode(content)?;
+
+            // Respond to free up other side
+            request.respond(Response::empty(200u32))?;
+
+            // Convert block into Struct
+            let new_block = Block::deserialize_from_bytes(&content_hex_decoded).expect("failed to deserialize Block mined send");
+            println!("got Block: {:?} from {:?}", new_block, remote_addr);
+
+            // Verify block
+            let verify_res = new_block.verify();
+            if verify_res{
+                println!("block verified by verify function. further verification?...");
+
+                // TODO: further verification code
 
                 let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
-                let blockchain_handle = arced_mutexed_blockchain.lock();
+                let mut blockchain_handle = arced_mutexed_blockchain.lock();
 
-                let data_as_hex = hex::encode(blockchain_handle.serialize_stack_to_bytes());
+                blockchain_handle.add_block(new_block.clone());
+                blockchain_handle.add_hash_to_new_block(new_block.hash());
 
-                let response = Response::from_string(data_as_hex);
-                request.respond(response)?;
+                if blockchain_handle.verify(){
+                    println!("further verification by blockchain is valid. accepting block...");
+
+                    blockchain_handle.set_cancel_mining_flag(true);
+                }else{
+                    println!("further verification by blockchain is INVALID. trashing block...");
+
+                    // Trash added block and hash
+                    blockchain_handle.destroy_current_block_and_hash();
+                }
+
 
                 std::mem::drop(blockchain_controller_handle);
-            }
-            "/post_block" => {
-                println!("got Block: {:?}", content);
+                std::mem::drop(blockchain_handle);
 
-                let content_hex_decoded = hex::decode(content)?;
+            }else{
+                println!("block failed to verify by verify function. trashing block!...");
+            }
+        }
+        "/post_add_peers" => {
+            println!("{} wants to add peers: {:?}", remote_addr, content);
+        }
+        "/get_blockchain_hashed_and_length" => {
+            println!("{} wants our blockchain length and hashed", remote_addr);
+        }
+        "/connect" => {
+            println!("{:?} wants to connect to the network", remote_addr);
+            // Get Remote Peer send in Request
+            let remote_port: usize = String::from_utf8(content)?.parse()?;
 
-                // Convert block into Struct
-                let new_block = Block::deserialize_from_bytes(&content_hex_decoded);
-                println!("got Block: {:?}", new_block);
-            }
-            "/post_add_peers" => {
-                println!("{} wants to add peers: {:?}", remote_addr, content);
-            }
-            "/get_blockchain_hashed_and_length" => {
-                println!("{} wants our blockchain length and hashed", remote_addr);
-            }
-            "/connect" => {
-                // Add their address to peer list
-                let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+            let remote_server = remote_addr
+                .split(':')
+                .next()
+                .ok_or("Failed to parse remote server addr in /connect")?
+                .to_string()
+                + ":"
+                + &remote_port.to_string();
 
+            println!("parsed remote server address to {:?}", remote_server);
+
+            // Add their address to peer list
+            let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+
+            blockchain_controller_handle
+                .peers
+                .insert(remote_server.clone());
+
+            // And then respond with our current peer list // whitespace seperated
+            let response = Response::from_string(
                 blockchain_controller_handle
                     .peers
-                    .insert(remote_addr.clone());
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<String>>()
+                    .join(" "),
+            );
+            request.respond(response)?;
 
-                // And then respond with our current peer list // whitespace seperated
-                let response = Response::from_string(
-                    blockchain_controller_handle
-                        .peers
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<String>>()
-                        .join(" "),
-                );
-                request.respond(response)?;
+            blockchain_controller_handle.spread_peer_plague(PeerPlague {
+                initiatior: remote_server.clone(),
+                already_infected: vec![remote_server.clone()],
+            });
 
-                blockchain_controller_handle.spread_peer_plague(PeerPlague {
-                    initiatior: remote_addr.clone(),
-                    already_infected: vec![],
-                });
+            std::mem::drop(blockchain_controller_handle);
 
-                std::mem::drop(blockchain_controller_handle);
+            println!(
+                "Added '{}' to peers and gave them our peer list",
+                remote_server
+            );
+        }
+        "/spread_plague" => {
+            println!("{} wants us to spread a plague", remote_addr);
 
-                println!(
-                    "Added '{}' to peers and gave them our peer list",
-                    remote_addr
-                );
-            }
-            "/add_and_spread_peer" => {
-                println!("{} wants us to spread a plague",remote_addr);
+            let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
 
-                let mut blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
+            let plague: PeerPlague = serde_json::from_str(&String::from_utf8(content)?)?;
 
-                let plague: PeerPlague = serde_json::from_str(&String::from_utf8(content)?)?;
+            // Respond to free up the other side
+            request.respond(Response::empty(200))?;
 
-                println!("Plague: {:?}",plague);
+            println!("Plague: {:?}", plague);
 
-                blockchain_controller_handle.peers.insert(plague.initiatior.clone());
+            blockchain_controller_handle
+                .peers
+                .insert(plague.initiatior.clone());
 
-                blockchain_controller_handle.spread_peer_plague(plague.clone());
+            blockchain_controller_handle.spread_peer_plague(plague.clone());
 
-                std::mem::drop(blockchain_controller_handle);
+            std::mem::drop(blockchain_controller_handle);
 
-                println!(
-                    "Plague initiated by '{}', further infecting all known peers",
-                    plague.initiatior
-                );
-            }
-            _ => {
-                println!(
-                    "received request! method: {:?}, url: {:?}, body_length: {:?}",
-                    request.method(),
-                    request.url(),
-                    request.body_length()
-                );
-            }
+            println!(
+                "Plague initiated by '{}', further infected all known peers",
+                plague.initiatior
+            );
+        }
+        _ => {
+            println!(
+                "received request! method: {:?}, url: {:?}, body_length: {:?}",
+                request.method(),
+                request.url(),
+                request.body_length()
+            );
         }
     }
     Ok(())

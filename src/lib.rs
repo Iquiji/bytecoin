@@ -14,7 +14,7 @@ use sodiumoxide::crypto::sign::{self, sign_detached};
 use serde::{Deserialize, Serialize};
 
 const MINER_REWARD: u64 = 100;
-const STARTING_DIFFICULTY: u8 = 10;
+const STARTING_DIFFICULTY: u8 = 15;
 
 type Hash = [u8; 32];
 
@@ -28,6 +28,7 @@ pub struct BlockchainController {
     pub blockchain: Arc<Mutex<Blockchain>>,
     pub peers: HashSet<String>,
     pub mined_flag: bool,
+    pub port: usize,
 }
 impl BlockchainController {
     pub fn publish_new_mined_block(
@@ -37,11 +38,12 @@ impl BlockchainController {
         let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
 
         for peer in all_peers {
-            let peer_http_patted = "http://".to_owned() + &peer + "/post_block";
+            let peer_http_patted = "http://".to_owned() + &peer + "/post_mined_block";
 
             println!("sending block to {:?}", peer_http_patted);
 
             let response = ureq::post(&peer_http_patted)
+                .timeout(std::time::Duration::from_millis(2000))
                 .send_string(&hex::encode(block_to_be_published.serialize_to_bytes()))?;
             println!("response: {:?}", response);
         }
@@ -52,7 +54,7 @@ impl BlockchainController {
         &mut self,
         peer_to_connect_to: &str,
     ) -> Result<(), Box<dyn Error>> {
-        let response = ureq::post(peer_to_connect_to).call()?;
+        let response = ureq::post(peer_to_connect_to).send_string(&self.port.to_string())?;
         println!("response: {:?}", response);
 
         let mut content: String = String::new();
@@ -74,7 +76,8 @@ impl BlockchainController {
 
         // Compute new plague with new peers if existing
         for peer in &all_peers {
-            if evolved_plague.already_infected.contains(peer) || peer == &evolved_plague.initiatior {
+            if evolved_plague.already_infected.contains(peer) || peer == &evolved_plague.initiatior
+            {
                 continue;
             } else {
                 evolved_plague.already_infected.push(peer.to_string());
@@ -87,11 +90,12 @@ impl BlockchainController {
                 continue;
             }
 
-            let peer_http_patted = "http://".to_owned() + &peer + "/add_and_spread_peer";
+            let peer_http_patted = "http://".to_owned() + &peer + "/spread_plague";
 
             println!("sending Plague to {:?}", peer_http_patted);
 
             if let Ok(response) = ureq::post(&peer_http_patted)
+                .timeout(std::time::Duration::from_millis(2000))
                 .send_string(&serde_json::to_string(&evolved_plague).unwrap())
             {
                 println!("response: {:?}", response);
@@ -117,6 +121,7 @@ pub struct Blockchain {
     current_mining_block: Block,
     current_block_updated_flag: bool,
     cancel_mining_flag: bool,
+    pub currently_mining: bool,
 }
 impl Blockchain {
     pub fn genesis() -> Self {
@@ -134,6 +139,7 @@ impl Blockchain {
             ),
             current_block_updated_flag: false,
             cancel_mining_flag: false,
+            currently_mining: false,
         }
     }
 
@@ -161,6 +167,15 @@ impl Blockchain {
             let current = &blocks[1];
 
             if prev.timestamp > current.timestamp {
+                return false;
+            }
+        }
+        // Verify index correspondence in all blocks:
+        for blocks in self.stack.windows(2) {
+            let prev = &blocks[0];
+            let current = &blocks[1];
+
+            if prev.index > current.index {
                 return false;
             }
         }
@@ -258,8 +273,9 @@ impl Blockchain {
         self.cancel_mining_flag = false;
         temp
     }
-    pub fn destroy_current_block(&mut self) {
+    pub fn destroy_current_block_and_hash(&mut self) {
         self.stack.pop();
+        self.hashes.pop();
     }
     pub fn check_balance_of_account(&self, account_pk: PublicKey) -> u64 {
         let mut total: u64 = 0;
@@ -285,6 +301,13 @@ pub fn mine_new_block(
 ) -> bool {
     // Get MutexGuard
     let mut current_blockchain_handle = blockchain.lock();
+
+    if current_blockchain_handle.currently_mining{
+        println!("already mining! EXITING mining function");
+        return false;
+    }else{
+        current_blockchain_handle.currently_mining = true;
+    }
 
     let previous_hash = current_blockchain_handle.current_hash();
     let mut block: Block = Block::new_from_current_time(
@@ -337,6 +360,15 @@ pub fn mine_new_block(
                 );
 
                 let mut current_blockchain_handle = blockchain.lock();
+
+                if current_blockchain_handle.get_cancel_mining_flag() {
+                    eprintln!("canceled mining new block! was at batch: {}", batch_number);
+        
+                    current_blockchain_handle.currently_mining = false;
+        
+                    return false;
+                }
+
                 current_blockchain_handle.add_block(block.clone());
                 current_blockchain_handle.add_hash_to_new_block(hash_result);
 
@@ -344,6 +376,8 @@ pub fn mine_new_block(
                 let blockchain_controller_handle = blockchain_controller.lock();
 
                 let _res = blockchain_controller_handle.publish_new_mined_block(&block);
+
+                current_blockchain_handle.currently_mining = false;
 
                 return true;
             }
@@ -356,11 +390,19 @@ pub fn mine_new_block(
         }
         if current_blockchain_handle.get_cancel_mining_flag() {
             eprintln!("canceled mining new block! was at batch: {}", batch_number);
+
+            current_blockchain_handle.currently_mining = false;
+
             return false;
         }
         std::mem::drop(current_blockchain_handle);
         batch_number += 1;
     }
+    // Get Blockchain and say we exited mining
+    let mut current_blockchain_handle = blockchain.lock();
+
+    current_blockchain_handle.currently_mining = false;
+
     false
 }
 
