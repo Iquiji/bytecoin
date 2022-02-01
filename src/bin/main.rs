@@ -3,6 +3,7 @@ use promptly::{prompt, prompt_default, prompt_opt};
 use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 
+use core::panic;
 use std::error::Error;
 use std::thread;
 use std::{collections::HashSet, sync::Arc};
@@ -124,7 +125,7 @@ fn ask_for_user_action(
 
             let are_u_sure: bool = prompt_default(
                 "are you sure you want to connect to: ".to_owned() + &connect_to_http_patted,
-                false,
+                true,
             )?;
 
             match are_u_sure {
@@ -134,9 +135,32 @@ fn ask_for_user_action(
                     blockchain_controller_handle
                         .connect_to_peer_and_get_peers(&connect_to_http_patted)?;
 
-                    blockchain_controller_handle.peers.insert(connect_to);
+                    blockchain_controller_handle.peers.insert(connect_to.clone());
 
                     std::mem::drop(blockchain_controller_handle);
+
+                    let get_blockchain: bool = prompt_default(
+                        "Do you want their Blockchain?: ".to_owned() + &connect_to_http_patted,
+                        true,
+                    )?;
+
+                    match get_blockchain {
+                        true => {
+                            let blockchain_stack = BlockchainController::get_entire_blockchain_stack_from_peer(&connect_to).expect("Error while pulling entire blockchain from peer");
+                            println!("Setting Their Blockchain stack as ours! Blockchain stack: {:?}",blockchain_stack);
+
+                            let mut current_blockchain_handle = blockchain.lock();
+
+                            current_blockchain_handle.update_stack(blockchain_stack);
+                            
+                            if current_blockchain_handle.verify(){
+                                println!("Verified Accepted Blockchain!");
+                            }else{
+                                panic!("Couldnt Verify requested Blockchain");
+                            }
+                        },
+                        false => todo!("Cannot not pull their blockchain!"),
+                    }
                 }
                 false => {
                     println!("Not Connecting then...")
@@ -203,7 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = Arc::new(server);
     let mut guards = Vec::with_capacity(4);
 
-    for _ in 0..4 {
+    for _ in 0..1 {
         let server = server.clone();
 
         let arced_mutexed_blockchain_controller = arced_mutexed_blockchain_controller.clone();
@@ -214,13 +238,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match rq {
                 Ok(request) => {
+                    println!("handling new Request!");
                     let _res = handle_request(
                         request,
                         arced_mutexed_blockchain_controller.clone(),
                         arced_mutexed_blockchain.clone(),
                     );
                 }
-                Err(err) => eprintln!("{}", err),
+                Err(err) => eprintln!("!!!: {:?}", err),
             }
         });
 
@@ -237,6 +262,7 @@ fn handle_request(
     arced_mutexed_blockchain_controller: Arc<Mutex<BlockchainController>>,
     arced_mutexed_blockchain: Arc<Mutex<Blockchain>>,
 ) -> Result<(), Box<dyn Error>> {
+
     let mut content = vec![];
     request.as_reader().read_to_end(&mut content)?;
 
@@ -251,11 +277,12 @@ fn handle_request(
 
             let data_as_hex = hex::encode(blockchain_handle.serialize_stack_to_bytes());
 
+            std::mem::drop(blockchain_controller_handle);
+            std::mem::drop(blockchain_handle);
+
             let response = Response::from_string(data_as_hex);
             request.respond(response)?;
 
-            std::mem::drop(blockchain_controller_handle);
-            std::mem::drop(blockchain_handle);
         }
         "/post_mined_block" => {
             let content_hex_decoded = hex::decode(content)?;
@@ -278,8 +305,7 @@ fn handle_request(
                 let blockchain_controller_handle = arced_mutexed_blockchain_controller.lock();
                 let mut blockchain_handle = arced_mutexed_blockchain.lock();
 
-                blockchain_handle.add_block(new_block.clone());
-                blockchain_handle.add_hash_to_new_block(new_block.hash());
+                blockchain_handle.add_block(new_block);
 
                 if blockchain_handle.verify() {
                     println!("further verification by blockchain is valid. accepting block...");

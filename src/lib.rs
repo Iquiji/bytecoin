@@ -38,19 +38,25 @@ impl BlockchainController {
     ) -> Result<(), Box<dyn Error>> {
         let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
 
-        for peer in all_peers {
+        BlockchainController::publish_data_to_given_peers(&hex::encode(block_to_be_published.serialize_to_bytes()),all_peers)?;
+
+        Ok(())
+    }
+    pub fn publish_data_to_given_peers(data: &str,peers: Vec<String>) -> Result<(), Box<dyn Error>> {
+        for peer in peers {
             let peer_http_patted = "http://".to_owned() + &peer + "/post_mined_block";
 
-            println!("sending block to {:?}", peer_http_patted);
+            println!("sending block to {:?} in seperate func 'publish_to_given_peers'", peer_http_patted);
 
             let response = ureq::post(&peer_http_patted)
-                .timeout(std::time::Duration::from_millis(2000))
-                .send_string(&hex::encode(block_to_be_published.serialize_to_bytes()))?;
+                .timeout(std::time::Duration::from_millis(10000))
+                .send_string(data)?;
             println!("response: {:?}", response);
         }
 
         Ok(())
     }
+
     pub fn connect_to_peer_and_get_peers(
         &mut self,
         peer_to_connect_to: &str,
@@ -103,6 +109,28 @@ impl BlockchainController {
             }
         }
     }
+    pub fn get_entire_blockchain_stack_from_peer(peer_to_connect_to: &str) -> Result<Vec<Block>,Box<dyn Error>>{
+
+        let peer_http_patted = "http://".to_owned() + &peer_to_connect_to + "/get_blockchain";
+
+        println!("requesting entire Blockchain from: {:?}", peer_http_patted);
+
+        match ureq::post(&peer_http_patted)
+        .timeout(std::time::Duration::from_millis(10000))
+        .call() {
+            Ok(response) => {
+                let mut content: Vec<u8> = vec![];
+                response.into_reader().read_to_end(&mut content)?;
+
+                let response_decoded = hex::decode(content)?;
+
+                let blockchain_stack = Blockchain::deserialize_stack_from_bytes(&response_decoded)?;
+
+                return Ok(blockchain_stack);         
+            },
+            Err(err) => return Err(Box::new(err)),
+        }
+    }
 }
 
 pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
@@ -117,7 +145,7 @@ pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Blockchain {
     pub stack: Vec<Block>,
-    pub hashes: Vec<Hash>,
+    //pub hashes: Vec<Hash>,
     pub difficulty: u8,
     current_mining_block: Block,
     current_block_updated_flag: bool,
@@ -130,23 +158,28 @@ impl Blockchain {
 
         Blockchain {
             stack: vec![genesis_block.clone()],
-            hashes: vec![genesis_block.hash()],
+            //hashes: vec![genesis_block.hash()],
             difficulty: STARTING_DIFFICULTY,
-            current_mining_block: Block::generate_genisis_block(VERSION, STARTING_DIFFICULTY),
+            current_mining_block: genesis_block,
             current_block_updated_flag: false,
             cancel_mining_flag: false,
             currently_mining: false,
         }
     }
 
+    pub fn update_stack(&mut self,stack: Vec<Block>){
+        self.stack = stack;
+        self.set_cancel_mining_flag(true);
+    }
+
     pub fn verify(&self) -> bool {
         // Verifiy integrity of hashes for each block:
-        for (block, hash) in self.stack.iter().cloned().zip(&self.hashes) {
-            if &block.hash() != hash {
-                eprintln!("Hash of Block isnt the same as saved Hash.block: {:?},hash of block: {:?},hash: {:?}",block,hex::encode(block.hash()),hex::encode(hash));
-                return false;
-            }
-        }
+        // for (block, hash) in self.stack.iter().cloned().zip(&self.hashes) {
+        //     if &block.hash() != hash {
+        //         eprintln!("Hash of Block isnt the same as saved Hash.block: {:?},hash of block: {:?},hash: {:?}",block,hex::encode(block.hash()),hex::encode(hash));
+        //         return false;
+        //     }
+        // }
 
         // Verify integrity of hashes in blocks in each other:
         for blocks in self.stack.windows(2) {
@@ -154,7 +187,7 @@ impl Blockchain {
             let current = &blocks[1];
 
             if prev.hash() != current.previous_hash {
-                eprintln!("hash of previous block and saved in this block are different!");
+                eprintln!("hash of previous block and saved in this block are different!\n prev: {:?}\n,hash of prev: '{:?}'\n current: {:?}",prev,prev.hash(),current);
                 return false;
             }
         }
@@ -244,19 +277,9 @@ impl Blockchain {
     pub fn current_block_ref(&mut self) -> &Block {
         self.stack.last().ok_or("fatal: no block on stack").unwrap()
     }
-    pub fn current_hash(&self) -> Hash {
-        *self
-            .hashes
-            .last()
-            .ok_or("fatal: no block on stack")
-            .unwrap()
-    }
     pub fn add_block(&mut self, block: Block) {
         self.stack.push(block);
         self.current_block_updated_flag = false;
-    }
-    pub fn add_hash_to_new_block(&mut self, hash: Hash) {
-        self.hashes.push(hash);
     }
     pub fn update_current_mining_block(&mut self, block: Block) {
         self.current_mining_block = block;
@@ -276,7 +299,6 @@ impl Blockchain {
     }
     pub fn destroy_current_block_and_hash(&mut self) {
         self.stack.pop();
-        self.hashes.pop();
     }
     pub fn check_balance_of_account(&self, account_pk: PublicKey) -> u64 {
         let mut total: u64 = 0;
@@ -310,7 +332,7 @@ pub fn mine_new_block(
         current_blockchain_handle.currently_mining = true;
     }
 
-    let previous_hash = current_blockchain_handle.current_hash();
+    let previous_hash = current_blockchain_handle.current_block_ref().hash();
     let mut block: Block = Block::new_from_current_time(
         0u8,
         current_blockchain_handle.current_block_ref().index + 1,
@@ -327,9 +349,8 @@ pub fn mine_new_block(
     std::mem::drop(current_blockchain_handle);
 
     println!(
-        "struct: {:?},as_bytes: {:?}",
+        "struct: {:?}",
         block,
-        block.serialize_to_bytes()
     );
 
     const BATCH_SIZE: usize = 1028;
@@ -370,13 +391,26 @@ pub fn mine_new_block(
                     return false;
                 }
 
+                if current_blockchain_handle.is_updated() {
+                    block = current_blockchain_handle.current_mining_block.clone();
+                    batch_number = 0;
+
+                    println!("dropped this succesfully mined block because of new block update");
+
+                    continue;
+                }
+
                 current_blockchain_handle.add_block(block.clone());
-                current_blockchain_handle.add_hash_to_new_block(hash_result);
 
                 // Publish new block to all peers
                 let blockchain_controller_handle = blockchain_controller.lock();
 
-                let _res = blockchain_controller_handle.publish_new_mined_block(&block);
+                let res = blockchain_controller_handle.publish_new_mined_block(&block);
+                match res {
+                    Ok(_) => {},
+                    Err(err) => eprintln!("Error while calling blockchain_controller_handle.publish_new_mined_block: '{:?}'",err),
+                }
+                
 
                 current_blockchain_handle.currently_mining = false;
 
