@@ -38,15 +38,24 @@ impl BlockchainController {
     ) -> Result<(), Box<dyn Error>> {
         let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
 
-        BlockchainController::publish_data_to_given_peers(&hex::encode(block_to_be_published.serialize_to_bytes()),all_peers)?;
+        BlockchainController::publish_data_to_given_peers(
+            &hex::encode(block_to_be_published.serialize_to_bytes()),
+            all_peers,
+        )?;
 
         Ok(())
     }
-    pub fn publish_data_to_given_peers(data: &str,peers: Vec<String>) -> Result<(), Box<dyn Error>> {
+    pub fn publish_data_to_given_peers(
+        data: &str,
+        peers: Vec<String>,
+    ) -> Result<(), Box<dyn Error>> {
         for peer in peers {
             let peer_http_patted = "http://".to_owned() + &peer + "/post_mined_block";
 
-            println!("sending block to {:?} in seperate func 'publish_to_given_peers'", peer_http_patted);
+            println!(
+                "sending block to {:?} in seperate func 'publish_to_given_peers'",
+                peer_http_patted
+            );
 
             let response = ureq::post(&peer_http_patted)
                 .timeout(std::time::Duration::from_millis(10000))
@@ -109,15 +118,17 @@ impl BlockchainController {
             }
         }
     }
-    pub fn get_entire_blockchain_stack_from_peer(peer_to_connect_to: &str) -> Result<Vec<Block>,Box<dyn Error>>{
-
-        let peer_http_patted = "http://".to_owned() + &peer_to_connect_to + "/get_blockchain";
+    pub fn get_entire_blockchain_stack_from_peer(
+        peer_to_connect_to: &str,
+    ) -> Result<Vec<Block>, Box<dyn Error>> {
+        let peer_http_patted = "http://".to_owned() + peer_to_connect_to + "/get_blockchain";
 
         println!("requesting entire Blockchain from: {:?}", peer_http_patted);
 
         match ureq::post(&peer_http_patted)
-        .timeout(std::time::Duration::from_millis(10000))
-        .call() {
+            .timeout(std::time::Duration::from_millis(10000))
+            .call()
+        {
             Ok(response) => {
                 let mut content: Vec<u8> = vec![];
                 response.into_reader().read_to_end(&mut content)?;
@@ -126,9 +137,9 @@ impl BlockchainController {
 
                 let blockchain_stack = Blockchain::deserialize_stack_from_bytes(&response_decoded)?;
 
-                return Ok(blockchain_stack);         
-            },
-            Err(err) => return Err(Box::new(err)),
+                Ok(blockchain_stack)
+            }
+            Err(err) => Err(Box::new(err)),
         }
     }
 }
@@ -167,7 +178,7 @@ impl Blockchain {
         }
     }
 
-    pub fn update_stack(&mut self,stack: Vec<Block>){
+    pub fn update_stack(&mut self, stack: Vec<Block>) {
         self.stack = stack;
         self.set_cancel_mining_flag(true);
     }
@@ -216,7 +227,7 @@ impl Blockchain {
         // Verify inner block integrity
         for block in &self.stack {
             if !block.verify() {
-                eprintln!("inner Verification of block failed. block: {:?}",block);
+                eprintln!("inner Verification of block failed. block: {:?}", block);
                 return false;
             }
         }
@@ -348,10 +359,7 @@ pub fn mine_new_block(
     // Release MutexGuard
     std::mem::drop(current_blockchain_handle);
 
-    println!(
-        "struct: {:?}",
-        block,
-    );
+    println!("struct: {:?}", block,);
 
     const BATCH_SIZE: usize = 1028;
 
@@ -410,7 +418,6 @@ pub fn mine_new_block(
                     Ok(_) => {},
                     Err(err) => eprintln!("Error while calling blockchain_controller_handle.publish_new_mined_block: '{:?}'",err),
                 }
-                
 
                 current_blockchain_handle.currently_mining = false;
 
@@ -499,14 +506,11 @@ impl Block {
 
         true
     }
-    fn generate_genisis_block(
-        version: u8,
-        difficulty: u8,
-    ) -> Block {
+    fn generate_genisis_block(version: u8, difficulty: u8) -> Block {
         Block {
             version,
             index: 0,
-            previous_hash: [0u8;32],
+            previous_hash: [0u8; 32],
             timestamp: 0i64,
             difficulty,
             nonce: 0,

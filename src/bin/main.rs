@@ -135,7 +135,9 @@ fn ask_for_user_action(
                     blockchain_controller_handle
                         .connect_to_peer_and_get_peers(&connect_to_http_patted)?;
 
-                    blockchain_controller_handle.peers.insert(connect_to.clone());
+                    blockchain_controller_handle
+                        .peers
+                        .insert(connect_to.clone());
 
                     std::mem::drop(blockchain_controller_handle);
 
@@ -146,19 +148,26 @@ fn ask_for_user_action(
 
                     match get_blockchain {
                         true => {
-                            let blockchain_stack = BlockchainController::get_entire_blockchain_stack_from_peer(&connect_to).expect("Error while pulling entire blockchain from peer");
-                            println!("Setting Their Blockchain stack as ours! Blockchain stack: {:?}",blockchain_stack);
+                            let blockchain_stack =
+                                BlockchainController::get_entire_blockchain_stack_from_peer(
+                                    &connect_to,
+                                )
+                                .expect("Error while pulling entire blockchain from peer");
+                            println!(
+                                "Setting Their Blockchain stack as ours! Blockchain stack: {:?}",
+                                blockchain_stack
+                            );
 
                             let mut current_blockchain_handle = blockchain.lock();
 
                             current_blockchain_handle.update_stack(blockchain_stack);
-                            
-                            if current_blockchain_handle.verify(){
+
+                            if current_blockchain_handle.verify() {
                                 println!("Verified Accepted Blockchain!");
-                            }else{
+                            } else {
                                 panic!("Couldnt Verify requested Blockchain");
                             }
-                        },
+                        }
                         false => todo!("Cannot not pull their blockchain!"),
                     }
                 }
@@ -262,7 +271,6 @@ fn handle_request(
     arced_mutexed_blockchain_controller: Arc<Mutex<BlockchainController>>,
     arced_mutexed_blockchain: Arc<Mutex<Blockchain>>,
 ) -> Result<(), Box<dyn Error>> {
-
     let mut content = vec![];
     request.as_reader().read_to_end(&mut content)?;
 
@@ -282,7 +290,6 @@ fn handle_request(
 
             let response = Response::from_string(data_as_hex);
             request.respond(response)?;
-
         }
         "/post_mined_block" => {
             let content_hex_decoded = hex::decode(content)?;
