@@ -10,7 +10,8 @@ enum MessageEnum{
 }
 
 struct MessageAnswer{
-
+    route_id: u16,
+    data: Vec<u8>,
 }
 
 // 8 + 2 + 1 + 1 + 8 + ? = 20bytes + ? bytes
@@ -87,7 +88,12 @@ impl MessageContoller{
     }
 }
 
+struct Peer{
+
+}
+
 struct P2PController{
+    // TODO: Peer Structure with more Data
     known_peers: Vec<String>,
 
     // for sending anf recieving from the network
