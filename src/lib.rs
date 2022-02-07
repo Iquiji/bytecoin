@@ -14,7 +14,7 @@ use sodiumoxide::crypto::sign::{self, sign_detached};
 use serde::{Deserialize, Serialize};
 
 const MINER_REWARD: u64 = 100;
-const STARTING_DIFFICULTY: u8 = 15;
+const STARTING_DIFFICULTY: u8 = 18;
 const VERSION: u8 = 0;
 
 type Hash = [u8; 32];
@@ -41,6 +41,7 @@ impl BlockchainController {
         BlockchainController::publish_data_to_given_peers(
             &hex::encode(block_to_be_published.serialize_to_bytes()),
             all_peers,
+            "/post_mined_block"
         )?;
 
         Ok(())
@@ -48,9 +49,10 @@ impl BlockchainController {
     pub fn publish_data_to_given_peers(
         data: &str,
         peers: Vec<String>,
+        suffix: &str
     ) -> Result<(), Box<dyn Error>> {
         for peer in peers {
-            let peer_http_patted = "http://".to_owned() + &peer + "/post_mined_block";
+            let peer_http_patted = "http://".to_owned() + &peer + suffix;
 
             println!(
                 "sending block to {:?} in seperate func 'publish_to_given_peers'",
@@ -142,6 +144,19 @@ impl BlockchainController {
             Err(err) => Err(Box::new(err)),
         }
     }
+
+    pub fn spread_transaction_to_all_peers(&self,transaction_to_be_published: Transaction) -> Result<(),Box<dyn Error>>{
+        
+        let all_peers = self.peers.iter().cloned().collect::<Vec<String>>();
+
+        BlockchainController::publish_data_to_given_peers(
+            &hex::encode(transaction_to_be_published.serialize_to_bytes()),
+            all_peers,
+            "/post_transaction"
+        )?;
+
+        Ok(())
+    }
 }
 
 pub fn get_leading_zeros_of_u8_slice(v: &[u8]) -> u32 {
@@ -162,6 +177,7 @@ pub struct Blockchain {
     current_block_updated_flag: bool,
     cancel_mining_flag: bool,
     pub currently_mining: bool,
+    transaction_queue: Vec<Transaction>
 }
 impl Blockchain {
     pub fn genesis() -> Self {
@@ -175,6 +191,7 @@ impl Blockchain {
             current_block_updated_flag: false,
             cancel_mining_flag: false,
             currently_mining: false,
+            transaction_queue: vec![],
         }
     }
 
@@ -184,6 +201,8 @@ impl Blockchain {
     }
 
     pub fn verify(&self) -> bool {
+        // TODO: Check if Balance of all acounts is valid
+
         // Verifiy integrity of hashes for each block:
         // for (block, hash) in self.stack.iter().cloned().zip(&self.hashes) {
         //     if &block.hash() != hash {
@@ -275,8 +294,9 @@ impl Blockchain {
         Ok(stack)
     }
 
-    pub fn add_new_transaction_to_mining_block(&mut self, transaction: Transaction) {
-        self.current_block_mut().add_transaction(transaction);
+    pub fn add_new_transaction_to_transaction_queue(&mut self, transaction: Transaction) {
+        self.transaction_queue.push(transaction);
+        //self.current_mining_block.add_transaction(transaction);
         self.current_block_updated_flag = true;
     }
     pub fn current_block_mut(&mut self) -> &mut Block {
@@ -327,6 +347,11 @@ impl Blockchain {
 
         total
     }
+    fn get_all_pending_transactions(&mut self) -> Vec<Transaction>{
+        let res = self.transaction_queue.clone();
+        self.transaction_queue = vec![];
+        res
+    }
 }
 pub fn mine_new_block(
     blockchain: Arc<Mutex<Blockchain>>,
@@ -350,6 +375,10 @@ pub fn mine_new_block(
         previous_hash,
         current_blockchain_handle.difficulty,
     );
+
+    for transaction in current_blockchain_handle.get_all_pending_transactions(){
+        block.add_transaction(transaction);
+    }
 
     // Add own Mining fee in case we are successfull
     block.add_transaction(Transaction::generate_miner_transaction(identity.public_key));
@@ -404,7 +433,13 @@ pub fn mine_new_block(
                     batch_number = 0;
 
                     println!("dropped this succesfully mined block because of new block update");
+                    println!("Updated Mining Block!: {:?}",block);
 
+                    for transaction in current_blockchain_handle.get_all_pending_transactions(){
+                        block.add_transaction(transaction);
+                    }     
+
+                    current_blockchain_handle.current_mining_block = block.clone();
                     continue;
                 }
 
@@ -428,6 +463,15 @@ pub fn mine_new_block(
         let mut current_blockchain_handle = blockchain.lock();
         if current_blockchain_handle.is_updated() {
             block = current_blockchain_handle.current_mining_block.clone();
+
+            for transaction in current_blockchain_handle.get_all_pending_transactions(){
+                block.add_transaction(transaction);
+            }
+
+            current_blockchain_handle.current_mining_block = block.clone();
+
+            println!("Updated Mining Block!: {:?}",block);
+
             batch_number = 0;
         }
         if current_blockchain_handle.get_cancel_mining_flag() {
@@ -610,6 +654,8 @@ pub struct Transaction {
 }
 impl Transaction {
     pub fn verify(&self) -> bool {
+        // TODO: Check if balance does exist...
+
         let mut is_valid = true;
 
         if (self.miner_reward_flag == 1 && self.sender.as_ref() != [0u8; 32])
@@ -653,21 +699,21 @@ impl Transaction {
         .concat()
     }
 
-    pub fn generate_transaction_from_secret_key(
-        secret_key: SecretKey,
+    pub fn generate_transaction_from_identity(
+        sender_id: Identity,
         reciever_public_key: PublicKey,
         amount: u64,
     ) -> Self {
         let to_be_signed = Self::in_flight_transaction_to_be_signed(
-            secret_key.public_key(),
+            sender_id.public_key,
             reciever_public_key,
             amount,
         );
         Transaction {
-            sender: secret_key.public_key(),
+            sender: sender_id.public_key,
             reciever: reciever_public_key,
             amount,
-            signature_of_sender: sign_detached(&to_be_signed, &secret_key),
+            signature_of_sender: sign_detached(&to_be_signed, &sender_id.secret_key),
             miner_reward_flag: 0,
         }
     }

@@ -12,7 +12,9 @@ use sodiumoxide::crypto::sign::ed25519::PublicKey;
 
 use tiny_http::{Request, Response, Server};
 
-use bytecoin_lib::{mine_new_block, Block, Blockchain, BlockchainController, Identity, PeerPlague};
+use bytecoin_lib::{
+    mine_new_block, Block, Blockchain, BlockchainController, Identity, PeerPlague, Transaction,
+};
 
 fn ask_for_user_action(
     blockchain: Arc<Mutex<Blockchain>>,
@@ -58,7 +60,7 @@ fn ask_for_user_action(
                     );
                 }
                 None => {
-                    let public_key_to_check = current_identity.public_key;
+                    let public_key_to_check = current_identity.clone().public_key;
                     let current_blockchain_handle = blockchain.lock();
 
                     let amount =
@@ -117,7 +119,41 @@ fn ask_for_user_action(
         } else if command == "exit" {
             break;
         } else if command == "transfer" {
-            todo!();
+            let current_blockchain_handle = blockchain.lock();
+            let amount_available =
+                current_blockchain_handle.check_balance_of_account(current_identity.clone().public_key);
+            println!(
+                "You have {} coins available for transfer.",
+                amount_available
+            );
+            drop(current_blockchain_handle);
+
+            let account_to_transfer_to: String =
+                prompt("What account do you want to transfer to?")?;
+            let amount: u64 = prompt("how many coins do you want to transfer?")?;
+            if amount > amount_available {
+                println!("you dont have that much available");
+            } else if amount == 0 {
+                println!("doing nothing then....")
+            } else {
+                let public_key_to_transfer =
+                    PublicKey::from_slice(&hex::decode(account_to_transfer_to.clone())?)
+                        .ok_or("error parsing to private key")?;
+
+                let transaction = Transaction::generate_transaction_from_identity(
+                    current_identity.clone(),
+                    public_key_to_transfer,
+                    amount,
+                );
+
+                let current_blockchain_controller_handle = blockchain_controller.lock();
+
+                current_blockchain_controller_handle.spread_transaction_to_all_peers(transaction)?;
+
+                std::mem::drop(current_blockchain_controller_handle);
+
+                println!("Transfered {} coins to {}", amount, account_to_transfer_to);
+            }
         } else if command == "connect" {
             let connect_to: String = prompt("Adress to connect to")?;
 
@@ -329,6 +365,25 @@ fn handle_request(
                 std::mem::drop(blockchain_handle);
             } else {
                 println!("block failed to verify by verify function. trashing block!...");
+            }
+        }
+        "/post_transaction" => {
+            let content_hex_decoded = hex::decode(content)?;
+
+            // Respond to free up other side
+            request.respond(Response::empty(200u32))?;
+
+            // Convert block into Struct
+            let new_transaction = Transaction::deserialize_from_bytes(&content_hex_decoded)
+                .expect("failed to deserialize Transaction someone send");
+            println!("got Transaction: {:?} from {:?},verify? {:?}", new_transaction, remote_addr,new_transaction.verify());
+
+            if new_transaction.verify() {
+                println!("Transaction verified by verify function. Adding to be mined Transactions");
+                let mut blockchain_handle = arced_mutexed_blockchain.lock();
+                blockchain_handle.add_new_transaction_to_transaction_queue(new_transaction);
+            }else{
+                println!("Transaction FAILED to be verified by verify function. Trashing...");
             }
         }
         "/post_add_peers" => {
