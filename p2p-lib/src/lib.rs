@@ -14,9 +14,13 @@ use tokio::{
     },
 };
 
-const DEFAULT_TTL: u8 = 5;
+const DEFAULT_TTL: u8 = 255;
 const DEFAULT_SEND_TO_N: u32 = 100;
 
+
+/// MessageTypes have IDs:
+/// 0: Message
+/// 1: MessageAnswer
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum MessageEnum {
     Message(Message),
@@ -35,32 +39,37 @@ trait Deserialize {
     fn deserialize(&self) -> Result<Vec<u8>>;
 }
 
-//  8 + 2 + ?
+// TODO: Add message_type to MessageAnswer and Message for serialization
+
+// 1 + 8 + 2 + ?
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageAnswer {
+    message_type: u8,
     message_length: u64,
-    // type info at byte 9 & 10
     route_id: u16,
     data: Vec<u8>,
 }
 impl MessageAnswer {
     pub fn new_from_data(route: u16, data: Vec<u8>) -> MessageAnswer {
         MessageAnswer {
-            message_length: 10 + data.len() as u64,
+            message_type: 1, /// Hardcoded currently
+            message_length: 11 + data.len() as u64,
             route_id: route,
             data,
         }
     }
 
-    async fn from_readable(readable: &mut (dyn AsyncRead + Unpin)) -> Result<MessageAnswer> {
+    async fn from_readable(readable: &mut (dyn AsyncRead + Unpin + Send)) -> Result<MessageAnswer> {
+        let message_type: u8 = readable.read_u8().await?;
         let message_length: u64 = readable.read_u64().await?;
 
         // Have to convert u64 to usize so message buffer in huge messages could fail
-        let mut message_buffer: Vec<u8> = vec![0; (message_length - 8).try_into()?];
+        let mut message_buffer: Vec<u8> = vec![0; (message_length - 9).try_into()?];
 
         readable.read_exact(&mut message_buffer).await?;
 
         let message = MessageAnswer {
+            message_type,
             message_length,
             route_id: u16::from_be_bytes(message_buffer[0..2].try_into()?),
             data: message_buffer[2..].to_vec(),
@@ -72,6 +81,7 @@ impl MessageAnswer {
 impl Deserialize for MessageAnswer {
     fn deserialize(&self) -> Result<Vec<u8>> {
         let deserialized: Vec<u8> = vec![
+            self.message_type.to_be_bytes().to_vec(),
             self.message_length.to_be_bytes().to_vec(),
             self.route_id.to_be_bytes().to_vec(),
             self.data.to_vec(),
@@ -82,11 +92,11 @@ impl Deserialize for MessageAnswer {
     }
 }
 
-// 8 + 2 + 1 + 1 + 8 + ? = 20bytes + ? bytes
+// 1 + 8 + 2 + 1 + 1 + 8 + ? = 20bytes + ? bytes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Message {
+    message_type: u8, /// Hardcoded Currently
     message_length: u64,
-    // type info at byte 9 & 10
     route_id: u16,
     broadcasting_type: u8, /// 0 message to all, 1 get answer from first peer
     time_to_live: u8,
@@ -98,7 +108,8 @@ impl Message {
     /// broadcasting_type: 0 message to all, 1 get answer from first peer
     pub fn new_from_data(route: u16, broadcasting_type: u8, data: Vec<u8>) -> Message {
         Message {
-            message_length: 20 + data.len() as u64,
+            message_type: 0, /// Hardcoded Currently
+            message_length: 21 + data.len() as u64,
             route_id: route,
             broadcasting_type,
             time_to_live: DEFAULT_TTL,
@@ -108,14 +119,16 @@ impl Message {
     }
 
     async fn from_readable(readable: &mut (dyn AsyncRead + Unpin + Send)) -> Result<Message> {
+        let message_type: u8 = readable.read_u8().await?;
         let message_length: u64 = readable.read_u64().await?;
 
         // Have to convert u64 to usize so message buffer in huge messages could fail
-        let mut message_buffer: Vec<u8> = vec![0; (message_length - 8).try_into()?];
+        let mut message_buffer: Vec<u8> = vec![0; (message_length - 9).try_into()?];
 
         readable.read_exact(&mut message_buffer).await?;
 
         let message = Message {
+            message_type,
             message_length,
             route_id: u16::from_be_bytes(message_buffer[0..2].try_into()?),
             broadcasting_type: message_buffer[2],
@@ -130,6 +143,7 @@ impl Message {
 impl Deserialize for Message {
     fn deserialize(&self) -> Result<Vec<u8>> {
         let deserialized: Vec<u8> = vec![
+            self.message_type.to_be_bytes().to_vec(),
             self.message_length.to_be_bytes().to_vec(),
             self.route_id.to_be_bytes().to_vec(),
             [self.broadcasting_type].to_vec(),
@@ -340,27 +354,47 @@ impl P2PController {
         (mut tcp_stream, _socket_addr): (TcpStream, SocketAddr),
     ) -> Result<()> {
         // TODO: make it possible to use MessageAnswer
-        let message = Message::from_readable(&mut tcp_stream).await?;
 
-        let mut cache = message_cache.lock().await;
+        // Peek first byte to detect MessageEnum Type:
+        let mut message_type_buf: Vec<u8> = vec![0u8;1];
+        tcp_stream.peek(&mut message_type_buf).await?;
+        let message_type = message_type_buf[0];
 
-        if cache.insert_and_collide(MessageEnum::Message(message.clone())) {
-            println!("message: {:?} already in cache, skipping...",message);
-            Ok(())
-        } else {
-            consumer_tx_channel.send(MessageEnum::Message(message.clone()))?;
+        match message_type{
+            // Message Type: Message
+            0 => {
+                let message = Message::from_readable(&mut tcp_stream).await?;
 
-            //TODO: send to MessageSender for Broadcasting
-            //TODO: improve over putting it all into messaging queue
+                let mut cache = message_cache.lock().await;
 
-            if message.time_to_live > 1 && message.broadcasting_type == 0{
-                let mut new_message = message.clone();
-                new_message.time_to_live -= 1;
-                message_sending_channel.send(MessageEnum::Message(new_message)).unwrap();
-            }
+                if cache.insert_and_collide(MessageEnum::Message(message.clone())) {
+                    println!("message: {:?} already in cache, skipping...",message);
+                    return Ok(());
+                } else {
+                    consumer_tx_channel.send(MessageEnum::Message(message.clone()))?;
 
-            Ok(())
+                    //TODO: send to MessageSender for Broadcasting
+                    //TODO: improve over putting it all into messaging queue
+
+                    if message.time_to_live > 1 && message.broadcasting_type == 0{
+                        let mut new_message = message.clone();
+                        new_message.time_to_live -= 1;
+                        message_sending_channel.send(MessageEnum::Message(new_message)).unwrap();
+                    }
+                }
+            },
+            // Message Type: MessageAnswer
+            1 => {
+                // TODO: Improve Answer Handling
+                let message_answer = MessageAnswer::from_readable(&mut tcp_stream).await?;
+
+                consumer_tx_channel.send(MessageEnum::MessageAnswer(message_answer.clone()))?;
+            },
+            _ => {
+                eprintln!("Non-handleable message recieved, ignoring....");
+            },
         }
+        Ok(())
     }
 
     /// Channel to get parsed messages out of
@@ -387,7 +421,7 @@ impl P2PController {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Message, MessageAnswer};
+    use crate::{Message, MessageAnswer, Deserialize};
 
     #[tokio::test]
     async fn message_serialization_deserialization() {
@@ -395,7 +429,7 @@ mod tests {
 
         println!("{:?}", message);
 
-        let mut deserialized = message.deserialize().unwrap();
+        let deserialized = message.deserialize().unwrap();
 
         println!("deserialized: {:?}", deserialized);
 
@@ -415,7 +449,7 @@ mod tests {
 
         println!("{:?}", message);
 
-        let mut deserialized = message.deserialize().unwrap();
+        let deserialized = message.deserialize().unwrap();
 
         println!("deserialized: {:?}", deserialized);
 
