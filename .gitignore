@@ -1,3 +1,4 @@
 /target
 *.identity
 Cargo.lock
+.vscode/
