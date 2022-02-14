@@ -1,6 +1,8 @@
+use blake2::digest::generic_array::arr::Inc;
 use eyre::Result;
+use rand::{thread_rng, Rng};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     sync::Arc,
     vec,
@@ -14,14 +16,15 @@ use tokio::{
     },
 };
 
-const DEFAULT_TTL: u8 = 255;
+const DEFAULT_TTL: u8 = 7;
 const DEFAULT_SEND_TO_N: u32 = 100;
 
+// TODO: context ID a la kafka // half done
 
 /// MessageTypes have IDs:
 /// 0: Message
 /// 1: MessageAnswer
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum MessageEnum {
     Message(Message),
     MessageAnswer(MessageAnswer),
@@ -39,22 +42,25 @@ trait Deserialize {
     fn deserialize(&self) -> Result<Vec<u8>>;
 }
 
-// TODO: Add message_type to MessageAnswer and Message for serialization
-
-// 1 + 8 + 2 + ?
+// 1 + 8 + 2 + 16 + ?
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageAnswer {
     message_type: u8,
     message_length: u64,
     route_id: u16,
+
+    context: u128,
+
     data: Vec<u8>,
 }
 impl MessageAnswer {
-    pub fn new_from_data(route: u16, data: Vec<u8>) -> MessageAnswer {
+    pub fn new_from_data(route: u16, context_id: u128, data: Vec<u8>) -> MessageAnswer {
         MessageAnswer {
-            message_type: 1, /// Hardcoded currently
-            message_length: 11 + data.len() as u64,
+            message_type: 1,
+            /// Hardcoded currently
+            message_length: 27 + data.len() as u64,
             route_id: route,
+            context: context_id,
             data,
         }
     }
@@ -72,7 +78,8 @@ impl MessageAnswer {
             message_type,
             message_length,
             route_id: u16::from_be_bytes(message_buffer[0..2].try_into()?),
-            data: message_buffer[2..].to_vec(),
+            context: u128::from_be_bytes(message_buffer[2..18].try_into()?),
+            data: message_buffer[18..].to_vec(),
         };
 
         Ok(message)
@@ -84,6 +91,7 @@ impl Deserialize for MessageAnswer {
             self.message_type.to_be_bytes().to_vec(),
             self.message_length.to_be_bytes().to_vec(),
             self.route_id.to_be_bytes().to_vec(),
+            self.context.to_be_bytes().to_vec(),
             self.data.to_vec(),
         ]
         .concat();
@@ -92,15 +100,19 @@ impl Deserialize for MessageAnswer {
     }
 }
 
-// 1 + 8 + 2 + 1 + 1 + 8 + ? = 20bytes + ? bytes
+// 1 + 8 + 2 + 1 + 1 + 8 + 16 + ? = 36bytes + ? bytes
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Message {
-    message_type: u8, /// Hardcoded Currently
+    message_type: u8,
+    /// Hardcoded Currently
     message_length: u64,
     route_id: u16,
-    broadcasting_type: u8, /// 0 message to all, 1 get answer from first peer
+    broadcasting_type: u8,
+    /// 0 message to all, 1 get answer from first peer
     time_to_live: u8,
     timestamp: i64,
+
+    context: u128,
 
     data: Vec<u8>,
 }
@@ -108,12 +120,14 @@ impl Message {
     /// broadcasting_type: 0 message to all, 1 get answer from first peer
     pub fn new_from_data(route: u16, broadcasting_type: u8, data: Vec<u8>) -> Message {
         Message {
-            message_type: 0, /// Hardcoded Currently
-            message_length: 21 + data.len() as u64,
+            message_type: 0,
+            /// Hardcoded Currently
+            message_length: 37 + data.len() as u64,
             route_id: route,
             broadcasting_type,
             time_to_live: DEFAULT_TTL,
             timestamp: chrono::Utc::now().timestamp(),
+            context: thread_rng().gen(),
             data,
         }
     }
@@ -134,7 +148,8 @@ impl Message {
             broadcasting_type: message_buffer[2],
             time_to_live: message_buffer[3],
             timestamp: i64::from_be_bytes(message_buffer[4..12].try_into()?),
-            data: message_buffer[12..].to_vec(),
+            context: u128::from_be_bytes(message_buffer[12..28].try_into()?),
+            data: message_buffer[28..].to_vec(),
         };
 
         Ok(message)
@@ -149,6 +164,7 @@ impl Deserialize for Message {
             [self.broadcasting_type].to_vec(),
             [self.time_to_live].to_vec(),
             self.timestamp.to_be_bytes().to_vec(),
+            self.context.to_be_bytes().to_vec(),
             self.data.to_vec(),
         ]
         .concat();
@@ -161,12 +177,25 @@ impl Deserialize for Message {
 struct MessageContoller {
     // Messages from here will be send periodacally
     queue_to_send: UnboundedReceiver<MessageEnum>,
+    cache: Arc<Mutex<IncommingMessageCache>>,
+    context_cache: Arc<Mutex<ContextCache>>,
+    channel_to_client: UnboundedSender<MessageEnum>,
 }
 impl MessageContoller {
-    fn new() -> (Self, UnboundedSender<MessageEnum>) {
+    fn new(
+        cache: Arc<Mutex<IncommingMessageCache>>,
+        channel_to_client: UnboundedSender<MessageEnum>,
+    ) -> (Self, UnboundedSender<MessageEnum>) {
         let (tx, rx): (UnboundedSender<MessageEnum>, UnboundedReceiver<MessageEnum>) =
             unbounded_channel::<MessageEnum>();
-        (MessageContoller { queue_to_send: rx }, tx)
+        (
+            MessageContoller {
+                queue_to_send: rx,
+                cache,
+                channel_to_client,
+            },
+            tx,
+        )
     }
     async fn sequential_send(&mut self, mutex_peer_list: Arc<Mutex<Vec<Peer>>>) {
         loop {
@@ -215,8 +244,16 @@ impl MessageContoller {
 
                     // TODO: Oneshot channel in return for answering?
 
-                    
+                    match message.clone() {
+                        MessageEnum::Message(msg) => {
+                            if msg.broadcasting_type == 1 {
+                                // Then wait for answer
 
+                                tokio::spawn(async {});
+                            }
+                        }
+                        _ => todo!(),
+                    }
                 }
                 Err(err) => eprintln!(
                     "failed to open tcp stream to {:?} with err: {:?}",
@@ -226,7 +263,32 @@ impl MessageContoller {
         }
     }
 }
+#[derive(Clone, Debug)]
+struct ContextCache {
+    // Context,Peer
+    cache: HashMap<u128, Peer>,
+}
+impl ContextCache {
+    /// Returns if there was a collision
+    fn get_if_existing(&self, context_id: u128) -> Option<Peer> {
+        if self.cache.contains_key(&context_id) {
+            return Some(
+                self.cache
+                    .get_key_value(&context_id)
+                    .ok_or("Internal Error contains but does not contain")
+                    .unwrap()
+                    .1
+                    .clone(),
+            );
+        }
+        None
+    }
+    fn insert(&mut self, context_id: u128, peer: Peer) {
+        self.cache.insert(context_id, peer);
+    }
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IncommingMessageCache {
     cache: HashSet<MessageEnum>,
 }
@@ -274,14 +336,18 @@ pub struct P2PController {
 }
 impl P2PController {
     pub fn new(port: u16) -> Self {
-        let (message_contoller, message_sending_channel) = MessageContoller::new();
+        let message_cache = Arc::new(Mutex::new(IncommingMessageCache::new()));
+
         let (incomming_message_tx_channel, incomming_message_rx_channel) =
             unbounded_channel::<MessageEnum>();
+
+        let (message_contoller, message_sending_channel) =
+            MessageContoller::new(message_cache.clone(), incomming_message_tx_channel.clone());
 
         P2PController {
             port,
             known_peers: Arc::new(Mutex::new(vec![])),
-            message_cache: Arc::new(Mutex::new(IncommingMessageCache::new())),
+            message_cache,
             message_contoller: Arc::new(Mutex::new(message_contoller)),
             message_sending_channel,
             incomming_message_rx_channel: Arc::new(Mutex::new(incomming_message_rx_channel)),
@@ -361,11 +427,11 @@ impl P2PController {
         // TODO: make it possible to use MessageAnswer
 
         // Peek first byte to detect MessageEnum Type:
-        let mut message_type_buf: Vec<u8> = vec![0u8;1];
+        let mut message_type_buf: Vec<u8> = vec![0u8; 1];
         tcp_stream.peek(&mut message_type_buf).await?;
         let message_type = message_type_buf[0];
 
-        match message_type{
+        match message_type {
             // Message Type: Message
             0 => {
                 let message = Message::from_readable(&mut tcp_stream).await?;
@@ -373,7 +439,7 @@ impl P2PController {
                 let mut cache = message_cache.lock().await;
 
                 if cache.insert_and_collide(MessageEnum::Message(message.clone())) {
-                    println!("message: {:?} already in cache, skipping...",message);
+                    println!("message: {:?} already in cache, skipping...", message);
                     return Ok(());
                 } else {
                     consumer_tx_channel.send(MessageEnum::Message(message.clone()))?;
@@ -381,23 +447,25 @@ impl P2PController {
                     //TODO: send to MessageSender for Broadcasting
                     //TODO: improve over putting it all into messaging queue
 
-                    if message.time_to_live > 1 && message.broadcasting_type == 0{
+                    if message.time_to_live > 1 && message.broadcasting_type == 0 {
                         let mut new_message = message.clone();
                         new_message.time_to_live -= 1;
-                        message_sending_channel.send(MessageEnum::Message(new_message)).unwrap();
+                        message_sending_channel
+                            .send(MessageEnum::Message(new_message))
+                            .unwrap();
                     }
                 }
-            },
+            }
             // Message Type: MessageAnswer
             1 => {
                 // TODO: Improve Answer Handling
                 let message_answer = MessageAnswer::from_readable(&mut tcp_stream).await?;
 
                 consumer_tx_channel.send(MessageEnum::MessageAnswer(message_answer.clone()))?;
-            },
+            }
             _ => {
                 eprintln!("Non-handleable message recieved, ignoring....");
-            },
+            }
         }
         Ok(())
     }
@@ -426,11 +494,11 @@ impl P2PController {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Message, MessageAnswer, Deserialize};
+    use crate::{Deserialize, Message, MessageAnswer};
 
     #[tokio::test]
     async fn message_serialization_deserialization() {
-        let message = Message::new_from_data(7, 7, vec![7; 7777]);
+        let message = Message::new_from_data(7, 7, vec![7; 7]);
 
         println!("{:?}", message);
 
@@ -450,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_answer_serialization_deserialization() {
-        let message = MessageAnswer::new_from_data(7, vec![7; 7777]);
+        let message = MessageAnswer::new_from_data(7, 7777777, vec![7; 7]);
 
         println!("{:?}", message);
 

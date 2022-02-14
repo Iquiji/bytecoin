@@ -575,7 +575,7 @@ impl Block {
             transactions: data[56..]
                 .chunks(137)
                 .filter(|x| !x.is_empty())
-                .map(|chunk| Transaction::deserialize_from_bytes(chunk))
+                .map(Transaction::deserialize_from_bytes)
                 .map(|transaction| transaction.ok())
                 .filter(|x| x.is_some())
                 .map(|f| f.ok_or("fatal: error while deserializing Block").unwrap())
@@ -659,7 +659,7 @@ impl Transaction {
         let mut is_valid = true;
 
         if (self.miner_reward_flag == 1 && self.sender.as_ref() != [0u8; 32])
-            || (sign::verify_detached(
+            || (!sign::verify_detached(
                 &self.signature_of_sender,
                 &Transaction::in_flight_transaction_to_be_signed(
                     self.sender,
